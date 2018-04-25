@@ -6,6 +6,29 @@ go version go1.10 linux/amd64
 # 章节01:入门go汇编 
 
 在我们开始研究运行时和标准库的实现之前，对Go的抽象汇编语言的熟悉是必须的。这本快速指南应该有望让您更快的理解。
+
+---
+
+**目录**
+<!-- START doctoc generated TOC please keep comment here to allow auto update -->
+<!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
+
+
+- ["伪汇编"](#pseudo-assembly)
+- [分解一个简单的程序](#decomposing-a-simple-program)
+  - [解剖`add`](#dissecting-add)
+  - [解剖 `main`](#dissecting-main)
+- [总结goroutines，堆栈和分裂](#a-word-about-goroutines-stacks-and-splits)
+  - [Stacks](#stacks)
+  - [Splits](#splits)
+  - [Minus some subtleties](#minus-some-subtleties)
+- [Conclusion](#conclusion)
+- [Links](#links)
+
+<!-- END doctoc generated TOC please keep comment here to allow auto update -->
+
+---
+
 * 本章假设你有汇编程序的基本知识。
 * 如果并且当遇到架构特定的问题时，总是假设linux/amd64。
 * 我们将始终致力于启用编译器优化。
