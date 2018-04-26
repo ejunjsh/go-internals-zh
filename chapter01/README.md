@@ -14,16 +14,11 @@ go version go1.10 linux/amd64
 <!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
 
 
-- ["伪汇编"](#pseudo-assembly)
-- [分解一个简单的程序](#decomposing-a-simple-program)
-  - [解剖`add`](#dissecting-add)
-  - [解剖 `main`](#dissecting-main)
-- [总结goroutines，堆栈和分裂](#a-word-about-goroutines-stacks-and-splits)
-  - [Stacks](#stacks)
-  - [Splits](#splits)
-  - [Minus some subtleties](#minus-some-subtleties)
-- [Conclusion](#conclusion)
-- [Links](#links)
+- ["伪汇编"](#%E4%BC%AA%E6%B1%87%E7%BC%96)
+- [分解一个简单的程序](#%E5%88%86%E8%A7%A3%E4%B8%80%E4%B8%AA%E7%AE%80%E5%8D%95%E7%9A%84%E7%A8%8B%E5%BA%8F)
+  - [解剖`add`](#%E8%A7%A3%E5%89%96add)
+  - [解剖`main`](#%E8%A7%A3%E5%89%96main)
+- [总结goroutines，堆栈和分裂](#%E6%80%BB%E7%BB%93goroutines%E5%A0%86%E6%A0%88%E5%92%8C%E5%88%86%E8%A3%82)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
 
