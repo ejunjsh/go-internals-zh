@@ -19,6 +19,8 @@ go version go1.10 linux/amd64
   - [解剖`add`](#%E8%A7%A3%E5%89%96add)
   - [解剖`main`](#%E8%A7%A3%E5%89%96main)
 - [总结goroutines，堆栈和分裂](#%E6%80%BB%E7%BB%93goroutines%E5%A0%86%E6%A0%88%E5%92%8C%E5%88%86%E8%A3%82)
+  - [堆栈](#%E5%A0%86%E6%A0%88)
+  - [分裂](#%E5%88%86%E8%A3%82)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
 
@@ -258,5 +260,13 @@ $ echo 'obase=2;137438953482' | bc
 ## 总结goroutines，堆栈和分裂
 现在不是深入研究goroutines内部结构的时间和地点（后面会讲到），但随着我们开始越来越多地考虑汇编转储，与堆栈管理有关的指令将迅速成为非常熟悉的视图。
 我们应该能够快速识别这些模式，并且在我们掌握时了解他们所做的一般想法以及他们为什么这样做。
+
+### 堆栈
+由于goroutine的数量在一个go程序中是非确定的或者可能在现实中达到几百万个，所以运行时必须采取保守的做法去分配栈空间给goroutine，否则会吃光可用的内存。
+例如每个新的goroutine在运行时的初始大小为2KB（实际上的内幕是栈在堆中分配的）
+假设一个goroutine一直运行，可能最后会使用超过刚开始分配的内存（栈溢出）。为了防止这种事情发生，运行时保证一个goroutine在消耗完一个栈的时候，一个两倍大的新栈分配出来，原来的栈的内容会拷贝到新栈上面。
+这过程称为栈分配（stack-split）而且这样可以有效的使goroutine栈成为动态大小的栈。
+
+### 分裂
 
 > to be continue...
