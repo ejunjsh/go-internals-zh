@@ -21,6 +21,11 @@ go version go1.10 linux/amd64
 - [总结goroutines，堆栈和分裂](#%E6%80%BB%E7%BB%93goroutines%E5%A0%86%E6%A0%88%E5%92%8C%E5%88%86%E8%A3%82)
   - [堆栈](#%E5%A0%86%E6%A0%88)
   - [分裂](#%E5%88%86%E8%A3%82)
+    - [序言（prologue）](#%E5%BA%8F%E8%A8%80prologue)
+    - [结语（epilogue）](#%E7%BB%93%E8%AF%ADepilogue)
+  - [减少一些微妙之处](#%E5%87%8F%E5%B0%91%E4%B8%80%E4%BA%9B%E5%BE%AE%E5%A6%99%E4%B9%8B%E5%A4%84)
+- [结论](#%E7%BB%93%E8%AE%BA)
+- [链接](#%E9%93%BE%E6%8E%A5)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
 
@@ -331,6 +336,7 @@ type g struct {
 ````
 我们可以看到`16(CX)`对应于`g.stackguard0`,它是由运行时维护的一个阀值。当它与栈指针比较的时候，代表是否一个goroutine就要花光内存了。这个序言会检查s是否当前`SP`的值小于或者等于`stackguard0`阀值（它应该更大）,如果是，就跳到结语那里。
 
+#### 结语（epilogue）
 ````Assembly
 0x003a NOP
 0x003a CALL	runtime.morestack_noctxt(SB)
