@@ -20,8 +20,13 @@ go version go1.10 linux/amd64
 ---
 
 **目录**
-<!-- START doctoc -->
-<!-- END doctoc -->
+<!-- START doctoc generated TOC please keep comment here to allow auto update -->
+<!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
+
+
+- [函数和方法调用](#%E5%87%BD%E6%95%B0%E5%92%8C%E6%96%B9%E6%B3%95%E8%B0%83%E7%94%A8)
+
+<!-- END doctoc generated TOC please keep comment here to allow auto update -->
 
 ---
 
@@ -30,7 +35,6 @@ go version go1.10 linux/amd64
 * 我们将始终致力于启用编译器优化。
 * 除非另有说明，否则引用的文字和/或注释始终来自官方文档和/或代码库。
 
-# 章节02:
 
 ## 函数和方法调用
 正如Russ Cox在其关于函数调用的设计文档（本章最后列出）中指出的那样，go具有..：
