@@ -46,22 +46,105 @@ go version go1.10 linux/amd64
 > - 匿名func（译者注：英文原文叫这个func literal）
 
 ..和5个不同种类的调用:
-> - 顶级func的直接调用（`func TopLevel(x int) {}`）
+> - 顶层func的直接调用（`func TopLevel(x int) {}`）
 > - 带有值接收器的直接方法调用（`func (Value) M(int) {}`）
 > - 带有指针接收器的直接方法调用（`func (*Pointer) M(int) {}`）
 > - 接口方法的间接调用（`type Interface interface { M(int) }`）
 > - func类型的值的间接调用（`var literal = func(x int) {}`）
 
 混合在一起，这些组合了10种可能的函数和调用类型组合：
-> - 顶级func的直接调用 /
+> - 顶层func的直接调用 /
 > - 带有值接收器的直接方法调用/
 > - 带有指针接收器的直接方法调用/
 > - 接口方法的间接调用/包含value方法的方法
 > - 接口方法的间接调用/包含带value方法的指针
 > - 接口方法的间接调用/包含带指针方法的指针
-> - func类型的值的间接调用/设置为顶级func
-> - func类型的值的间接调用/设置为value方法
+> - func类型的值的间接调用/设置为顶层func
+> - func类型的值的间接调用/设置为值方法
 > - func类型的值的间接调用/设置为指针方法
-> - func类型的值的间接调用/设置为func文字
+> - func类型的值的间接调用/设置为匿名func
 
 > （斜线将编译时已知的内容与运行时发现的内容区分开来。）
+
+我们将首先花几分钟时间来回顾三种直接调用，然后我们将把焦点转向本章其余部分的接口和间接方法调用。
+
+在本章中，我们不会涉及匿名函数，因为这样做首先需要我们熟悉闭包的机制，在适当的时候我们不可避免地会这样做。
+
+### 直接调用概述
+考虑下面的代码([direct_calls.go](https://github.com/ejunjsh/go-internals-zh/blob/master/chapter02/direct_calls.go))
+````go
+//go:noinline
+func Add(a, b int32) int32 { return a + b }
+
+type Adder struct{ id int32 }
+//go:noinline
+func (adder *Adder) AddPtr(a, b int32) int32 { return a + b }
+//go:noinline
+func (adder Adder) AddVal(a, b int32) int32 { return a + b }
+
+func main() {
+    Add(10, 32) // direct call of top-level function
+
+    adder := Adder{id: 6754}
+    adder.AddPtr(10, 32) // direct call of method with pointer receiver
+    adder.AddVal(10, 32) // direct call of method with value receiver
+
+    (&adder).AddVal(10, 32) // implicit dereferencing
+}
+````
+让我们快速浏览一下为这4个调用生成的代码。
+
+#### 直接调用顶层函数
+看一下调用`Add(10, 32)`时的汇编：
+````assembly
+0x0000 TEXT	"".main(SB), $40-0
+  ;; ...omitted everything but the actual function call...
+  0x0021 MOVQ	$137438953482, AX
+  0x002b MOVQ	AX, (SP)
+  0x002f CALL	"".Add(SB)
+  ;; ...omitted everything but the actual function call...
+````
+我们可以看到，正如我们在第一章中已经知道的那样，这将转化为在该`.text`部分中直接跳转到全局函数符号，参数和返回值存储在调用者的栈帧中。
+
+它就像它一样简单。
+
+Russ Cox 在他的文档上有提到
+> 直接调用顶层func：一个顶层func调用是在栈中传递所有参数，并且结果也是放在接着之前都连续的栈上。
+
+#### 带有指针接收器的直接方法调用
+首先，接收器被通过`adder := Adder{id: 6754}`初始化:
+````assembly
+0x0034 MOVL	$6754, "".adder+28(SP)
+````
+（我们的栈帧上的额外空间是作为帧指针前导码的一部分预先分配的，这里我们列出来。）
+
+然后来到实际的方法调用`adder.AddPtr(10, 32)`：
+````assembly
+0x0057 LEAQ	"".adder+28(SP), AX	;; move &adder to..
+0x005c MOVQ	AX, (SP)		;; ..the top of the stack (argument #1)
+0x0060 MOVQ	$137438953482, AX	;; move (32,10) to..
+0x006a MOVQ	AX, 8(SP)		;; ..the top of the stack (arguments #3 & #2)
+0x006f CALL	"".(*Adder).AddPtr(SB)
+````
+看一下汇编输出，我们能够清晰的看到方法的调用（无论是值接收器还是指针的）跟函数的调用几乎是一样的，唯一不同的是接收器会作为第一个参数传递。
+
+在这个例子里，我们通过`LEAQ	"".adder+28(SP), AX`加载有效地址，并放到栈顶上。所以`&adder`就是参数#1（如果你对`LEA`和`MOV`搞不清楚，你可以看看文章最后的链接）
+
+注意编译器怎么把接收器的类型编码进到符号名里面:`"".(*Adder).AddPtr`,无论接收器是值还是指针。
+
+> Direct call of method: In order to use the same generated code for both an indirect call of a func value and for a direct call, the code generated for a method (both value and pointer receivers) is chosen to have the same calling convention as a top-level function with the receiver as a leading argument.
+
+#### 带有值接收器的方法调用
+
+正如我们想的，用值接收器产出跟上面类似的代码：
+
+考虑一下`adder.AddVal(10, 32)`:
+````assembly
+0x003c MOVQ	$42949679714, AX	;; move (10,6754) to..
+0x0046 MOVQ	AX, (SP)		;; ..the top of the stack (arguments #2 & #1)
+0x004a MOVL	$32, 8(SP)		;; move 32 to the top of the stack (argument #3)
+0x0052 CALL	"".Adder.AddVal(SB)
+````
+看上去有点怪，上面生成的汇编居然没有引用`"".adder+28(SP)`,这个是接收器的值放的地方。
+
+
