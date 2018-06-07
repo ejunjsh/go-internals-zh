@@ -32,6 +32,10 @@ go version go1.10 linux/amd64
   - [隐式解引用](#%E9%9A%90%E5%BC%8F%E8%A7%A3%E5%BC%95%E7%94%A8)
     - [情况A:接收器在栈中](#%E6%83%85%E5%86%B5a%E6%8E%A5%E6%94%B6%E5%99%A8%E5%9C%A8%E6%A0%88%E4%B8%AD)
     - [情况B:接收器在堆上](#%E6%83%85%E5%86%B5b%E6%8E%A5%E6%94%B6%E5%99%A8%E5%9C%A8%E5%A0%86%E4%B8%8A)
+- [接口解剖](#%E6%8E%A5%E5%8F%A3%E8%A7%A3%E5%89%96)
+  - [数据结构概述](#%E6%95%B0%E6%8D%AE%E7%BB%93%E6%9E%84%E6%A6%82%E8%BF%B0)
+    - [`iface `结构](#iface-%E7%BB%93%E6%9E%84)
+    - [`itab `结构](#itab-%E7%BB%93%E6%9E%84)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
 
@@ -78,7 +82,7 @@ go version go1.10 linux/amd64
 在本章中，我们不会涉及匿名函数，因为这样做首先需要我们熟悉闭包的机制，在适当的时候我们不可避免地会这样做。
 
 ### 直接调用概述
-考虑下面的代码([direct_calls.go](https://github.com/ejunjsh/go-internals-zh/blob/master/chapter02/direct_calls.go))
+考虑下面的代码([direct_calls.go](https://github.com/teh-cmc/go-internals/blob/master/chapter2_interfaces/direct_calls.go))
 ````go
 //go:noinline
 func Add(a, b int32) int32 { return a + b }

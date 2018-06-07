@@ -45,7 +45,7 @@ Go编译器输出一个抽象的，可移植的汇编形式，实际上并不映
 > 汇编程序是一种解析半抽象指令集的描述并将其转变为输入到链接器的指令的方式。
 
 ## 分解一个简单的程序
-考虑以下Go代码（[direct_topfunc_call.go](https://github.com/ejunjsh/go-internals-zh/blob/master/chapter01/direct_topfunc_call.go)）：
+考虑以下Go代码（[direct_topfunc_call.go](https://github.com/teh-cmc/go-internals/blob/master/chapter1_assembly_primer/direct_topfunc_call.go)）：
 ````go
 //go:noinline
 func add(a, b int32) (int32, bool) { return a + b, true }
