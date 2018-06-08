@@ -221,8 +221,7 @@ Russ Cox 在他的文档上有提到
   ;; ...omitted epilogues...
 ````
 
-显然，考虑到需要做的所有拷贝以便来回传递参数，这种包装会引起相当多的开销; 特别是如果被包装的方法（wrappee）只是几个指令。
-幸运的是，实际上，编译器会直接将wrappee内联到包装器中，以分摊这些成本（至少在可行时）。
+显然，考虑到需要做的所有拷贝以便来回传递参数，这种包装会引起相当多的开销; 特别是如果被包装的方法（wrappee）只是几个指令。幸运的是，实际上，编译器会直接将wrappee内联到包装器中，以分摊这些成本（至少在可行时）。
 
 请注意`WRAPPER`符号定义中的指令,它指示此方法不应出现在回溯信息里面(这会混淆终端用户)，也不能从wrappee抛出的异常恢复(panics).
 
@@ -264,4 +263,109 @@ func panicwrap() {
 ````
 
 这就是函数和方法调用，我们现在将重点放在主要课程：接口。
+
+
+## 接口解剖
+
+### 数据结构概述
+
+在我们理解它们如何工作之前，我们首先需要建立一个构成接口的数据结构的心智模型，以及它们如何在内存中进行布局。为此，我们将快速浏览运行时包，从Go实现的角度看看接口是怎么实现都。
+
+#### `iface `结构
+
+`iface`是表示运行时内的接口的根类型（[src/runtime/runtime2.go](https://github.com/golang/go/blob/bf86aec25972f3a100c3aa58a6abcbcc35bdea49/src/runtime/runtime2.go#L143-L146)）。
+
+其定义如下所示：
+
+````go
+type iface struct { // 16 bytes on a 64bit arch
+    tab  *itab
+    data unsafe.Pointer
+}
+````
+
+因此一个接口是一个非常简单的结构，它保持2个指针：
+
+* `tab`保存了`itab`对象的地址，这个地址指向的地方包含了接口类型和这个接口类型所指向的数据类型
+* `data`是一个原始指针（`unsafe`）,它指向接口引用的值
+
+虽然非常简单，但这个定义已经为我们提供了一些有价值的信息：因为接口只能包含指针，所以我们包装到接口中的任何具体值都必须具有地址。
+
+多数情况下，这会导致堆分配，因为编译器采用保守的方法并强制接收方逃逸。
+
+即使对于标量类型也是如此！
+
+我们用几行代码证明（[https://github.com/teh-cmc/go-internals/blob/master/chapter2_interfaces/escape.go](escape.go)）
+
+````go
+type Addifier interface{ Add(a, b int32) int32 }
+
+type Adder struct{ name string }
+//go:noinline
+func (adder Adder) Add(a, b int32) int32 { return a + b }
+
+func main() {
+    adder := Adder{name: "myAdder"}
+    adder.Add(10, 32)	      // doesn't escape
+    Addifier(adder).Add(10, 32) // escapes
+}
+````
+
+````shell
+$ GOOS=linux GOARCH=amd64 go tool compile -m escape.go
+escape.go:13:10: Addifier(adder) escapes to heap
+# ...
+````
+
+用一个简单benchmark（[escape_test.go](https://github.com/teh-cmc/go-internals/blob/master/chapter2_interfaces/escape_test.go)）可视化这个堆分配
+
+````go
+func BenchmarkDirect(b *testing.B) {
+    adder := Adder{id: 6754}
+    for i := 0; i < b.N; i++ {
+        adder.Add(10, 32)
+    }
+}
+
+func BenchmarkInterface(b *testing.B) {
+    adder := Adder{id: 6754}
+    for i := 0; i < b.N; i++ {
+        Addifier(adder).Add(10, 32)
+    }
+}
+````
+
+````go
+$ GOOS=linux GOARCH=amd64 go tool compile -m escape_test.go 
+# ...
+escape_test.go:22:11: Addifier(adder) escapes to heap
+# ...
+````
+
+````shell
+$ GOOS=linux GOARCH=amd64 go test -bench=. -benchmem ./escape_test.go
+BenchmarkDirect-8      	2000000000	         1.60 ns/op	       0 B/op	       0 allocs/op
+BenchmarkInterface-8   	100000000	         15.0 ns/op	       4 B/op	       1 allocs/op
+````
+
+我们可以清楚地看到，每次我们创建一个新`Addifier`接口并用我们的`adder`变量对它进行初始化时，实际上会发生大小为`sizeof(Adder)`的堆分配。在本章的后面，我们将看到即使简单标量类型在与接口一起使用时也会导致堆分配。
+
+让我们把注意力转向下一个数据结构：`itab` 。
+
+#### `itab `结构
+
+`itab`定义([src/runtime/runtime2.go](https://github.com/golang/go/blob/bf86aec25972f3a100c3aa58a6abcbcc35bdea49/src/runtime/runtime2.go#L648-L658))
+
+````go
+type itab struct { // 40 bytes on a 64bit arch
+    inter *interfacetype
+    _type *_type
+    hash  uint32 // copy of _type.hash. Used for type switches.
+    _     [4]byte
+    fun   [1]uintptr // variable sized. fun[0]==0 means _type does not implement inter.
+}
+````
+
+一个`itab`是一个接口的心脏和大脑。
+
 
