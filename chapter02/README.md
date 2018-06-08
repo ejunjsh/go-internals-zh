@@ -220,4 +220,48 @@ Russ Cox 在他的文档上有提到
 
   ;; ...omitted epilogues...
 ````
-显然，
+
+显然，考虑到需要做的所有拷贝以便来回传递参数，这种包装会引起相当多的开销; 特别是如果被包装的方法（wrappee）只是几个指令。
+幸运的是，实际上，编译器会直接将wrappee内联到包装器中，以分摊这些成本（至少在可行时）。
+
+请注意`WRAPPER`符号定义中的指令,它指示此方法不应出现在回溯信息里面(这会混淆终端用户)，也不能从wrappee抛出的异常恢复(panics).
+
+> WRAPPER：这是一个包装函数，不应该算作禁用恢复。
+
+这个`runtime.panicwrap`函数，会在接收器是`nil`的时候抛出异常，而且不解自明的 这是完整的清单供参考（[src/runtime/error.go](https://github.com/golang/go/blob/bf86aec25972f3a100c3aa58a6abcbcc35bdea49/src/runtime/error.go#L132-L157)）：
+
+````go
+// panicwrap generates a panic for a call to a wrapped value method
+// with a nil pointer receiver.
+//
+// It is called from the generated wrapper code.
+func panicwrap() {
+    pc := getcallerpc()
+    name := funcname(findfunc(pc))
+    // name is something like "main.(*T).F".
+    // We want to extract pkg ("main"), typ ("T"), and meth ("F").
+    // Do it by finding the parens.
+    i := stringsIndexByte(name, '(')
+    if i < 0 {
+        throw("panicwrap: no ( in " + name)
+    }
+    pkg := name[:i-1]
+    if i+2 >= len(name) || name[i-1:i+2] != ".(*" {
+        throw("panicwrap: unexpected string after package name: " + name)
+    }
+    name = name[i+2:]
+    i = stringsIndexByte(name, ')')
+    if i < 0 {
+        throw("panicwrap: no ) in " + name)
+    }
+    if i+2 >= len(name) || name[i:i+2] != ")." {
+        throw("panicwrap: unexpected string after type name: " + name)
+    }
+    typ := name[:i]
+    meth := name[i+2:]
+    panic(plainError("value method " + pkg + "." + typ + "." + meth + " called using nil *" + typ + " pointer"))
+}
+````
+
+这就是函数和方法调用，我们现在将重点放在主要课程：接口。
+
