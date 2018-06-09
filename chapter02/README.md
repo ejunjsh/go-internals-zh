@@ -34,8 +34,8 @@ go version go1.10 linux/amd64
     - [情况B:接收器在堆上](#%E6%83%85%E5%86%B5b%E6%8E%A5%E6%94%B6%E5%99%A8%E5%9C%A8%E5%A0%86%E4%B8%8A)
 - [接口解剖](#%E6%8E%A5%E5%8F%A3%E8%A7%A3%E5%89%96)
   - [数据结构概述](#%E6%95%B0%E6%8D%AE%E7%BB%93%E6%9E%84%E6%A6%82%E8%BF%B0)
-    - [`iface `结构](#iface-%E7%BB%93%E6%9E%84)
-    - [`itab `结构](#itab-%E7%BB%93%E6%9E%84)
+    - [`iface`结构](#iface%E7%BB%93%E6%9E%84)
+    - [`itab`结构](#itab%E7%BB%93%E6%9E%84)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
 
@@ -275,7 +275,7 @@ func panicwrap() {
 
 在我们理解它们如何工作之前，我们首先需要建立一个构成接口的数据结构的心智模型，以及它们如何在内存中进行布局。为此，我们将快速浏览运行时包，从Go实现的角度看看接口是怎么实现都。
 
-#### `iface `结构
+#### `iface`结构
 
 `iface`是表示运行时内的接口的根类型（[src/runtime/runtime2.go](https://github.com/golang/go/blob/bf86aec25972f3a100c3aa58a6abcbcc35bdea49/src/runtime/runtime2.go#L143-L146)）。
 
@@ -356,7 +356,7 @@ BenchmarkInterface-8   	100000000	         15.0 ns/op	       4 B/op	       1 all
 
 让我们把注意力转向下一个数据结构：`itab` 。
 
-#### `itab `结构
+#### `itab`结构
 
 `itab`定义([src/runtime/runtime2.go](https://github.com/golang/go/blob/bf86aec25972f3a100c3aa58a6abcbcc35bdea49/src/runtime/runtime2.go#L648-L658))
 
@@ -372,4 +372,47 @@ type itab struct { // 40 bytes on a 64bit arch
 
 一个`itab`是一个接口的心脏和大脑。
 
+首先，它嵌入一个`_type`，它是运行时中任何Go类型的内部表示。
 
+`_type`描述了一个类型的每个方面：它的名字，它的特征（例如大小，对齐...），甚至在某种程度上，甚至它的表现（例如比较，散列...）！
+
+在这个情况，`_type`字段描述了接口值的类型，例如，`data`指针指向的就是这种类型的指针。
+
+其次，我们发现`interfacetype`指针，它仅仅是`_type`的包装，而且带了些关于接口的额外信息。
+
+正如您所期望的那样，该`inter`字段描述了接口本身的类型。
+
+最后，`fun`数组保存组成接口的虚拟/调度表的函数指针。
+
+注意注释`//variable sized`,这意味这个数组被声明的大小是不相关的。
+
+我们将在本章的后面看到，编译器负责分配支持这个数组的内存，并且独立于这里指定的大小。同样，运行时总是使用原始指针访问此数组，因此边界检查不适用于此。
+
+
+#### `_type`结构
+正如我们上面所说，`_type`结构给出了Go类型的完整描述。
+
+它的定义如下([src/runtime/type.go][https://github.com/golang/go/blob/bf86aec25972f3a100c3aa58a6abcbcc35bdea49/src/runtime/type.go#L25-L43])
+
+````go
+type _type struct { // 48 bytes on a 64bit arch
+    size       uintptr
+    ptrdata    uintptr // size of memory prefix holding all pointers
+    hash       uint32
+    tflag      tflag
+    align      uint8
+    fieldalign uint8
+    kind       uint8
+    alg        *typeAlg
+    // gcdata stores the GC type data for the garbage collector.
+    // If the KindGCProg bit is set in kind, gcdata is a GC program.
+    // Otherwise it is a ptrmask bitmap. See mbitmap.go for details.
+    gcdata    *byte
+    str       nameOff
+    ptrToThis typeOff
+}
+````
+
+值得庆幸的是，这些领域大部分都是不言自明的。
+
+`nameOff`&`typeOff`
