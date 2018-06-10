@@ -36,6 +36,12 @@ go version go1.10 linux/amd64
   - [数据结构概述](#%E6%95%B0%E6%8D%AE%E7%BB%93%E6%9E%84%E6%A6%82%E8%BF%B0)
     - [`iface`结构](#iface%E7%BB%93%E6%9E%84)
     - [`itab`结构](#itab%E7%BB%93%E6%9E%84)
+    - [`_type`结构](#_type%E7%BB%93%E6%9E%84)
+    - [`interfacetype`结构](#interfacetype%E7%BB%93%E6%9E%84)
+    - [结论](#%E7%BB%93%E8%AE%BA)
+  - [创建一个接口](#%E5%88%9B%E5%BB%BA%E4%B8%80%E4%B8%AA%E6%8E%A5%E5%8F%A3)
+    - [部分1:分配接收器](#%E9%83%A8%E5%88%861%E5%88%86%E9%85%8D%E6%8E%A5%E6%94%B6%E5%99%A8)
+    - [部分2:组装itab](#%E9%83%A8%E5%88%862%E7%BB%84%E8%A3%85itab)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
 
@@ -392,7 +398,7 @@ type itab struct { // 40 bytes on a 64bit arch
 #### `_type`结构
 正如我们上面所说，`_type`结构给出了Go类型的完整描述。
 
-它的定义如下([src/runtime/type.go][https://github.com/golang/go/blob/bf86aec25972f3a100c3aa58a6abcbcc35bdea49/src/runtime/type.go#L25-L43])
+它的定义如下([src/runtime/type.go](https://github.com/golang/go/blob/bf86aec25972f3a100c3aa58a6abcbcc35bdea49/src/runtime/type.go#L25-L43))
 
 ````go
 type _type struct { // 48 bytes on a 64bit arch
@@ -415,4 +421,167 @@ type _type struct { // 48 bytes on a 64bit arch
 
 值得庆幸的是，这些领域大部分都是不言自明的。
 
-`nameOff`&`typeOff`
+`nameOff`&`typeOff`类型是`int32`，表示在元数据的位移量，而这元数据最后会由链接器嵌入到可执行的程序里。
+
+元数据在运行期被加载进`runtime.moduledata`结构（[src/runtime/symtab.go](https://github.com/golang/go/blob/bf86aec25972f3a100c3aa58a6abcbcc35bdea49/src/runtime/symtab.go#L352-L393)）,这个结构跟ELF文件的内容是类似的。
+
+运行期提供了帮助类，这个帮助类通过`moduledata`结构来为下面的偏移量实现必要的逻辑。例如`resolveNameOff`[src/runtime/type.go](https://github.com/golang/go/blob/bf86aec25972f3a100c3aa58a6abcbcc35bdea49/src/runtime/type.go#L168-L196)和`resolveTypeOff`[src/runtime/type.go](https://github.com/golang/go/blob/bf86aec25972f3a100c3aa58a6abcbcc35bdea49/src/runtime/type.go#L202-L236)
+
+````go
+func resolveNameOff(ptrInModule unsafe.Pointer, off nameOff) name {}
+func resolveTypeOff(ptrInModule unsafe.Pointer, off typeOff) *_type {}
+````
+
+例如，假设`t`是`_type`类型，调用`resolveTypeOff(t, t.ptrToThis)` ,返回`t`的一个副本。
+
+#### `interfacetype`结构
+
+最后，`interfacetype`结构([src/runtime/type.go](https://github.com/golang/go/blob/bf86aec25972f3a100c3aa58a6abcbcc35bdea49/src/runtime/type.go#L342-L346)) :
+
+````go
+type interfacetype struct { // 80 bytes on a 64bit arch
+    typ     _type
+    pkgpath name
+    mhdr    []imethod
+}
+
+type imethod struct {
+    name nameOff
+    ityp typeOff
+}
+````
+
+之前说过，`interfacetype`只是一个`_type`类的包装，它添加了些额外的关于接口元数据的信息。
+
+在当前的实现中，元数据大多数由一些偏移量组成，这些偏移量指向方法的名字(names)和类型(types)，而这些方法由接口暴露出来(`[]imethod`).
+
+#### 结论
+
+下面概述了`iface`,把它的子类型都内联起来，这样能帮你连接所有点：
+
+
+````go
+type iface struct { // `iface`
+    tab *struct { // `itab`
+        inter *struct { // `interfacetype`
+            typ struct { // `_type`
+                size       uintptr
+                ptrdata    uintptr
+                hash       uint32
+                tflag      tflag
+                align      uint8
+                fieldalign uint8
+                kind       uint8
+                alg        *typeAlg
+                gcdata     *byte
+                str        nameOff
+                ptrToThis  typeOff
+            }
+            pkgpath name
+            mhdr    []struct { // `imethod`
+                name nameOff
+                ityp typeOff
+            }
+        }
+        _type *struct { // `_type`
+            size       uintptr
+            ptrdata    uintptr
+            hash       uint32
+            tflag      tflag
+            align      uint8
+            fieldalign uint8
+            kind       uint8
+            alg        *typeAlg
+            gcdata     *byte
+            str        nameOff
+            ptrToThis  typeOff
+        }
+        hash uint32
+        _    [4]byte
+        fun  [1]uintptr
+    }
+    data unsafe.Pointer
+}
+````
+
+这个部分描述了各种不同的数据类型，它们组合起来就是一个接口的结构，这样能帮助我们初步理解了结构之间是怎么互相工作的，就好像机器里面的齿轮一样。
+
+在下一个部分，我们将会学到这些数据结构是怎么运作的。
+
+
+### 创建一个接口
+
+现在我们快速过一下所有上面提及的数据结构，我们将把注意力放在它们怎么分配内存和初始化上。
+
+考虑下下面这个程序([iface.go](https://github.com/teh-cmc/go-internals/blob/master/chapter2_interfaces/iface.go)):
+
+````go
+type Mather interface {
+    Add(a, b int32) int32
+    Sub(a, b int64) int64
+}
+
+type Adder struct{ id int32 }
+//go:noinline
+func (adder Adder) Add(a, b int32) int32 { return a + b }
+//go:noinline
+func (adder Adder) Sub(a, b int64) int64 { return a - b }
+
+func main() {
+    m := Mather(Adder{id: 6754})
+
+    // This call just makes sure that the interface is actually used.
+    // Without this call, the linker would see that the interface defined above
+    // is in fact never used, and thus would optimize it out of the final
+    // executable.
+    m.Add(10, 32)
+}
+````
+
+注意： 对于本章的其余部分，我们将一个接口`I`和它持有的一个类型`T`表示为`<I,T>`。
+
+例如`Mather(Adder{id: 6754})`实例化一个`iface<Mather, Adder>`。
+
+让我们看看`iface<Mather, Adder>`的实例化过程：
+
+````go
+m := Mather(Adder{id: 6754})
+````
+
+这一行Go代码实际上引发了很多操作，因为编译器生成的汇编列表可以证明：
+
+````assembly
+;; part 1: allocate the receiver
+0x001d MOVL	$6754, ""..autotmp_1+36(SP)
+;; part 2: set up the itab
+0x0025 LEAQ	go.itab."".Adder,"".Mather(SB), AX
+0x002c MOVQ	AX, (SP)
+;; part 3: set up the data
+0x0030 LEAQ	""..autotmp_1+36(SP), AX
+0x0035 MOVQ	AX, 8(SP)
+0x003a CALL	runtime.convT2I32(SB)
+0x003f MOVQ	16(SP), AX
+0x0044 MOVQ	24(SP), CX
+````
+
+正如你看到的，我们分三个部分来讲解上面的汇编。
+
+#### 部分1:分配接收器
+
+````assembly
+0x001d MOVL	$6754, ""..autotmp_1+36(SP)
+````
+
+一个常量十进制值`6754`，对应的是`Adder`的ID,存储在当前栈帧的开始位置。
+
+它存储在那里导致编译器之后会用它的地址来引用它；我们在部分3再回来看看。
+
+
+#### 部分2:组装itab
+
+````go
+0x0025 LEAQ	go.itab."".Adder,"".Mather(SB), AX
+0x002c MOVQ	AX, (SP)
+````
+
+它看上去像编译器已经创建了一个
