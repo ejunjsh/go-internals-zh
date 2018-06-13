@@ -698,3 +698,72 @@ tab.fun[1] = getSymAddr(`main.(*Adder).Sub`).(uintptr)
 0x003f MOVQ	16(SP), AX
 0x0044 MOVQ	24(SP), CX
 ````
+
+从部分1里说过，栈顶(SP)当前保存了`go.itab."".Adder,"".Mather`地址(作为参数#1)。
+
+从部分2里面说过，我们保存`$6754`十进制常量到`""..autotmp_1+36(SP)`:现在我们加载这个常量的地址到栈顶的下一个字节8(SP)(作为参数#2)。
+
+这两个指针作为两个参数传递到`runtime.convT2I32`,这个函数是创建和返回一个完美接口的最后一步了。
+
+让我们更靠近的看看这个函数吧([src/runtime/iface.go](https://github.com/golang/go/blob/bf86aec25972f3a100c3aa58a6abcbcc35bdea49/src/runtime/iface.go#L433-L451))：
+
+````go
+func convT2I32(tab *itab, elem unsafe.Pointer) (i iface) {
+    t := tab._type
+    /* ...omitted debug stuff... */
+    var x unsafe.Pointer
+    if *(*uint32)(elem) == 0 {
+        x = unsafe.Pointer(&zeroVal[0])
+    } else {
+        x = mallocgc(4, t, false)
+        *(*uint32)(x) = *(*uint32)(elem)
+    }
+    i.tab = tab
+    i.data = x
+    return
+}
+````
+
+`runtime.convT2I32`做了四件事：
+
+1. 它创建了一个新的`iface`结构`i`（严格来说，是它的调用者创建它的，其实没什么不同）。
+2. 把`itab`指针赋值给`i.tab`。
+3. 它在堆中分配了一个类型为`i.tab._type`的对象，然后拷贝第二个参数所指向的值给这个对象。
+4. 它返回最终的接口。
+
+整个过程非常简单，尽管第三步在这个特定情况下涉及到一些棘手的实现细节，这是由于我们的`Adder`类型实际上是一种标量类型。
+
+我们将在关于[接口的特殊情况]()的章节中更详细地讨论标量类型和接口的交互。
+
+从概念上讲，我们现在完成了以下（伪代码）：
+
+````go
+tab := getSymAddr(`go.itab.main.Adder,main.Mather`).(*itab)
+elem := getSymAddr(`""..autotmp_1+36(SP)`).(*int32)
+
+i := runtime.convTI32(tab, unsafe.Pointer(elem))
+
+assert(i.tab == tab)
+assert(*(*int32)(i.data) == 6754) // same value..
+assert((*int32)(i.data) != elem)  // ..but different (al)locations!
+````
+
+为了总结所有这些，下面是所有3个部分的汇编代码的完整注释版本：
+````assembly
+0x001d MOVL	$6754, ""..autotmp_1+36(SP)         ;; create an addressable $6754 value at 36(SP)
+0x0025 LEAQ	go.itab."".Adder,"".Mather(SB), AX  ;; set up go.itab."".Adder,"".Mather..
+0x002c MOVQ	AX, (SP)                            ;; ..as first argument (tab *itab)
+0x0030 LEAQ	""..autotmp_1+36(SP), AX            ;; set up &36(SP)..
+0x0035 MOVQ	AX, 8(SP)                           ;; ..as second argument (elem unsafe.Pointer)
+0x003a CALL	runtime.convT2I32(SB)               ;; call convT2I32(go.itab."".Adder,"".Mather, &$6754)
+0x003f MOVQ	16(SP), AX                          ;; AX now holds i.tab (go.itab."".Adder,"".Mather)
+0x0044 MOVQ	24(SP), CX                          ;; CX now holds i.data (&$6754, somewhere on the heap)
+````
+
+请记住，所有这一切都始于一行：`m := Mather(Adder{id: 6754})`。
+
+我们最后会得到一个完整的，工作的接口。
+
+### 从可执行文件中重建`itab`
+
+
