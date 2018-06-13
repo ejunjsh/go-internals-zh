@@ -766,4 +766,63 @@ assert((*int32)(i.data) != elem)  // ..but different (al)locations!
 
 ### 从可执行文件中重建`itab`
 
+在之前的章节中，我们直接从编译器生成的目标文件里面拿到`go.itab."".Adder,"".Mather`的内容，发现除了`hash`值之外，几乎全是零的:
+
+````
+$ GOOS=linux GOARCH=amd64 go tool compile -S iface.go | grep -A 3 '^go.itab."".Adder,"".Mather'
+go.itab."".Adder,"".Mather SRODATA dupok size=40
+    0x0000 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  ................
+    0x0010 8a 3d 5f 61 00 00 00 00 00 00 00 00 00 00 00 00  .=_a............
+    0x0020 00 00 00 00 00 00 00 00                          ........
+````
+
+为了更好地了解数据如何布置到链接器生成的最终可执行文件中，我们将遍历生成的ELF文件并手动重构组成`itab`的字节
+
+希望这能让我们观察到在链接器链接完之后`itab`变成什么样了。
+
+首先，我们来构建`iface`二进制文件：`GOOS=linux GOARCH=amd64 go build -o iface.bin iface.go`。
+
+#### 第1步：查找`.rodata`
+
+让我们打印搜索节标题`.rodata`，`readelf`可以帮助：
+
+````shell
+$ readelf -St -W iface.bin
+There are 22 section headers, starting at offset 0x190:
+
+Section Headers:
+  [Nr] Name
+       Type            Address          Off    Size   ES   Lk Inf Al
+       Flags
+  [ 0] 
+       NULL            0000000000000000 000000 000000 00   0   0  0
+       [0000000000000000]: 
+  [ 1] .text
+       PROGBITS        0000000000401000 001000 04b3cf 00   0   0 16
+       [0000000000000006]: ALLOC, EXEC
+  [ 2] .rodata
+       PROGBITS        000000000044d000 04d000 028ac4 00   0   0 32
+       [0000000000000002]: ALLOC
+## ...omitted rest of output...
+````
+
+我们真正需要的是该部分的（十进制）偏移量，所以让我们应用一下pipe-foo：
+````shell
+$ readelf -St -W iface.bin | \
+  grep -A 1 .rodata | \
+  tail -n +2 | \
+  awk '{print "ibase=16;"toupper($3)}' | \
+  bc
+315392
+````
+
+意思是`.rodata`区域在二进制文件的位置是在315392字节处。
+
+现在我们需要做的是映射这个文件位置到一个虚拟内存地址。
+
+#### 第二步：找到`.rodata`的虚拟内存地址(VMA)
+
+VMA是虚拟地址，一旦二进制文件被OS加载到内存中，该部分将被映射到该虚拟地址。也就是说，这是我们将在运行时用来引用符号的地址。
+
+
 
