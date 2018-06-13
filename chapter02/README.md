@@ -574,7 +574,7 @@ m := Mather(Adder{id: 6754})
 
 一个常量十进制值`6754`，对应的是`Adder`的ID,存储在当前栈帧的开始位置。
 
-它存储在那里导致编译器之后会用它的地址来引用它；我们在部分3再回来看看。
+它存储在那是为了编译器之后会用它的地址来引用它；我们在部分3再回来看看。
 
 
 #### 部分2:组装itab
@@ -584,4 +584,117 @@ m := Mather(Adder{id: 6754})
 0x002c MOVQ	AX, (SP)
 ````
 
-它看上去像编译器已经创建了一个
+它看上去像编译器已经创建了一个`itab `来表示`iface<Mather, Adder>`接口，并且我们可以用一个全局符号`go.itab."".Adder,"".Mather`来让它可用。
+
+我们在创建`iface<Mather, Adder>`接口的过程中，为了能做到这点，我们加载全局符号`go.itab."".Adder,"".Mather`的有效地址到当前栈桢的顶部。
+
+再一次，我们在部分3能知道为什么。
+
+语法上，能够用以下伪代码来表示:
+````go
+tab := getSymAddr(`go.itab.main.Adder,main.Mather`).(*itab)
+````
+这里是我们接口的一半了(译者注：不知道怎么翻译)
+
+现在，我们都走到这里了，让我们深入的看看`go.itab."".Adder,"".Mather`符号。
+
+像往常一样，编译器的`-S`标志能告诉我们一些东西：
+````shell
+$ GOOS=linux GOARCH=amd64 go tool compile -S iface.go | grep -A 7 '^go.itab."".Adder,"".Mather'
+go.itab."".Adder,"".Mather SRODATA dupok size=40
+    0x0000 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  ................
+    0x0010 8a 3d 5f 61 00 00 00 00 00 00 00 00 00 00 00 00  .=_a............
+    0x0020 00 00 00 00 00 00 00 00                          ........
+    rel 0+8 t=1 type."".Mather+0
+    rel 8+8 t=1 type."".Adder+0
+    rel 24+8 t=1 "".(*Adder).Add+0
+    rel 32+8 t=1 "".(*Adder).Sub+0
+````
+我们一部分一部分的分析上面的输出。
+
+第一部分声明符号及其属性：
+
+````assembly
+go.itab."".Adder,"".Mather SRODATA dupok size=40
+````
+
+像往常一样，由于我们直接关注由编译器生成的中间目标文件（即链接程序尚未运行），因此符号名称仍然缺少包名称。这方面没有新东西。
+
+除此之外，我们在这里得到的是一个40字节的全局对象符号，它将被存储在`.rodata`我们的二进制文件的部分中。
+
+注意这个`dupok`指令，告诉链接器这个符号在链接时多次出现是合法的：链接器将不得不随意选择其中的一个。
+
+是什么让Go作者认为这个符号可能会重复，我不确定。随时提出问题，如果你知道更多。
+
+_[更新：我们在这个issue中继续讨论这个问题[ issue #7: How you can get duplicated go.itab interface definitions.](https://github.com/teh-cmc/go-internals/issues/7)]_
+
+第部分是与符号相关的40字节数据的十六进制转储。也就是说，这是一个`itab`结构的序列化表示：
+
+````
+0x0000 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  ................
+0x0010 8a 3d 5f 61 00 00 00 00 00 00 00 00 00 00 00 00  .=_a............
+0x0020 00 00 00 00 00 00 00 00                          ........
+````
+
+正如你所看到的，在这一点上，大部分数据只是一堆零。链接器会处理它们，正如我们稍后会看到的。
+
+请注意，在所有这些零中，实际上已经设置了4个字节，但是在偏移量处`0x10+4`。
+
+如果我们回顾一下itab结构的声明并注释其字段的相应偏移量：
+
+````go
+type itab struct { // 40 bytes on a 64bit arch
+    inter *interfacetype // offset 0x00 ($00)
+    _type *_type	 // offset 0x08 ($08)
+    hash  uint32	 // offset 0x10 ($16)
+    _     [4]byte	 // offset 0x14 ($20)
+    fun   [1]uintptr	 // offset 0x18 ($24)
+			 // offset 0x20 ($32)
+}
+````
+
+我们看到偏移量`0x10+4`与该`hash uint32`字段匹配：即，对应于我们`main.Adder`类型的哈希值已经在我们的目标文件中。
+
+第三部分也是最后一部分列出了链接器的一系列重定位指令：
+
+````
+rel 0+8 t=1 type."".Mather+0
+rel 8+8 t=1 type."".Adder+0
+rel 24+8 t=1 "".(*Adder).Add+0
+rel 32+8 t=1 "".(*Adder).Sub+0
+````
+
+`rel 0+8 t=1 type."".Mather+0`告诉链接器用全局符号`type."".Mather`的地址来填充目标目标文件的头8个字节(`0+8`)。
+
+`rel 8+8 t=1 type."".Adder+0`告诉链接器用全局符号`type."".Adder`的地址来填充目标目标文件的下一个8个字节，等等等等。
+
+一旦链接器完成工作并遵循所有这些指令，我们的40字节序列化`itab`将完成。
+
+总的来说，我们现在正在寻找类似于以下伪代码的东西：
+
+````go
+tab := getSymAddr(`go.itab.main.Adder,main.Mather`).(*itab)
+
+// NOTE: The linker strips the `type.` prefix from these symbols when building
+// the executable, so the final symbol names in the .rodata section of the
+// binary will actually be `main.Mather` and `main.Adder` rather than
+// `type.main.Mather` and `type.main.Adder`.
+// Don't get tripped up by this when toying around with objdump.
+tab.inter = getSymAddr(`type.main.Mather`).(*interfacetype)
+tab._type = getSymAddr(`type.main.Adder`).(*_type)
+
+tab.fun[0] = getSymAddr(`main.(*Adder).Add`).(uintptr)
+tab.fun[1] = getSymAddr(`main.(*Adder).Sub`).(uintptr)
+````
+
+我们已经准备好了`itab`，现在如果我们只需要一些数据，就可以创建一个完美的接口。
+
+#### 部分3:设置数据
+
+````assembly
+0x0030 LEAQ	""..autotmp_1+36(SP), AX
+0x0035 MOVQ	AX, 8(SP)
+0x003a CALL	runtime.convT2I32(SB)
+0x003f MOVQ	16(SP), AX
+0x0044 MOVQ	24(SP), CX
+````
