@@ -42,6 +42,10 @@ go version go1.10 linux/amd64
   - [创建一个接口](#%E5%88%9B%E5%BB%BA%E4%B8%80%E4%B8%AA%E6%8E%A5%E5%8F%A3)
     - [部分1:分配接收器](#%E9%83%A8%E5%88%861%E5%88%86%E9%85%8D%E6%8E%A5%E6%94%B6%E5%99%A8)
     - [部分2:组装itab](#%E9%83%A8%E5%88%862%E7%BB%84%E8%A3%85itab)
+    - [部分3:设置数据](#%E9%83%A8%E5%88%863%E8%AE%BE%E7%BD%AE%E6%95%B0%E6%8D%AE)
+  - [从可执行文件中重建`itab`](#%E4%BB%8E%E5%8F%AF%E6%89%A7%E8%A1%8C%E6%96%87%E4%BB%B6%E4%B8%AD%E9%87%8D%E5%BB%BAitab)
+    - [第1步：查找`.rodata`](#%E7%AC%AC1%E6%AD%A5%E6%9F%A5%E6%89%BErodata)
+    - [第二步：找到`.rodata`的虚拟内存地址(VMA)](#%E7%AC%AC%E4%BA%8C%E6%AD%A5%E6%89%BE%E5%88%B0rodata%E7%9A%84%E8%99%9A%E6%8B%9F%E5%86%85%E5%AD%98%E5%9C%B0%E5%9D%80vma)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
 
@@ -823,118 +827,6 @@ $ readelf -St -W iface.bin | \
 #### 第二步：找到`.rodata`的虚拟内存地址(VMA)
 
 VMA是虚拟地址，一旦二进制文件被OS加载到内存中，该部分将被映射到该虚拟地址。也就是说，这是我们将在运行时用来引用符号的地址。
-
-为什么我们会关心VMA呢，因为我们不能通过`readelf`和`objdump`来拿到指定符号的偏移量。我们能做的是，从另外角度来说，就是获取指定符号的VMA。
-
-加一些简单都数学运算，我们就能够建立VMA和偏移量之间的映射，最终找到我们需要的符号的编译量。
-
-找到`.rodata`的VMA跟找它的偏移量没什么不同，因为它们在不同的列上而已：
-
-````shell
-$ readelf -St -W iface.bin | \
-  grep -A 1 .rodata | \
-  tail -n +2 | \
-  awk '{print "ibase=16;"toupper($2)}' | \
-  bc
-4509696
-````
-
-至今为止，`.rodata`在ELF文件中的偏移量为`$315392`(=`0x04d000`)，在运行时映射的虚拟地址为`$4509696`(=`0x44d000`)
-
-现在我们需要我们找的那个符号的VMA和大小：
-* VMA（间接地）使我们能够定位这个符号在可执行文件的位置。
-* 它的大小将会告诉我们多少数据是我们需要抽取出来的，一旦我们知道正确的偏移量。
-
-
-#### 第三步：查找`go.itab.main.Adder,main.Mather`的VMA和大小
-
-`objdump`可以帮到我们。
-
-首先，找到那个符号
-
-````shell
-$ objdump -t -j .rodata iface.bin | grep "go.itab.main.Adder,main.Mather"
-0000000000475140 g     O .rodata	0000000000000028 go.itab.main.Adder,main.Mather
-````
-
-然后获取VMA的十进制数:
-
-````shell
-$ objdump -t -j .rodata iface.bin | \
-  grep "go.itab.main.Adder,main.Mather" | \
-  awk '{print "ibase=16;"toupper($1)}' | \
-  bc
-4673856
-````
-
-最后它十进制大小:
-
-````shell
-$ objdump -t -j .rodata iface.bin | \
-  grep "go.itab.main.Adder,main.Mather" | \
-  awk '{print "ibase=16;"toupper($5)}' | \
-  bc
-40
-````
-
-所以`go.itab.main.Adder,main.Mather`运行时映射的虚拟地址是`$4673856`(=`0x475140`),大小是40个字节(这个值跟`itab`的结构大小一致)
-
-#### 第四步：查找和抽取`go.itab.main.Adder,main.Mather`
-
-现在我们集齐所有能够计算`go.itab.main.Adder,main.Mather`在二进制文件位置的元素了。
-
-下面是我们现在知道的所有元素：
-
-````
-.rodata offset: 0x04d000 == $315392
-.rodata VMA: 0x44d000 == $4509696
-
-go.itab.main.Adder,main.Mather VMA: 0x475140 == $4673856
-go.itab.main.Adder,main.Mather size: 0x24 = $40
-````
-
-如果`$315392`（`.rodata`的偏移量）映射到`$4509696`（`.rodata`的VMA）和`go.itab.main.Adder,main.Mather`的VMA是`$4673856`,然后我们就能得出`go.itab.main.Adder,main.Mather`在可执行文件的偏移量为:`sym.offset = sym.vma - section.vma + section.offset = $4673856 - $4509696 + $315392 = $479552`。
-
-现在我们知道了偏移量和大小，就可以用`dd`命令从可执行文件里面抽取`go.itab.main.Adder,main.Mather`的原始字节了。
-
-````shell
-$ dd if=iface.bin of=/dev/stdout bs=1 count=40 skip=479552 2>/dev/null | hexdump
-0000000 bd20 0045 0000 0000 ed40 0045 0000 0000
-0000010 3d8a 615f 0000 0000 c2d0 0044 0000 0000
-0000020 c350 0044 0000 0000                    
-0000028
-````
-
-这看起来确实是一个明确的胜利..但是，真的吗？也许我们刚刚dump出来的只是40个完全随机的，无关的字节？谁知道？
-
-这里有个方法能够确认：让我们用运行时的hash值（来自下面代码[iface_type_hash.go](https://github.com/teh-cmc/go-internals/blob/master/chapter2_interfaces/iface_type_hash.go)）和我们在二进制文件中找到hash值（`0x10+4` -> `0x615f3d8a`）进行比较。
-
-````go
-// simplified definitions of runtime's iface & itab types
-type iface struct {
-    tab  *itab
-    data unsafe.Pointer
-}
-type itab struct {
-    inter uintptr
-    _type uintptr
-    hash  uint32
-    _     [4]byte
-    fun   [1]uintptr
-}
-
-func main() {
-    m := Mather(Adder{id: 6754})
-
-    iface := (*iface)(unsafe.Pointer(&m))
-    fmt.Printf("iface.tab.hash = %#x\n", iface.tab.hash) // 0x615f3d8a
-}
-````
-
-匹配上了! `fmt.Printf("iface.tab.hash = %#x\n", iface.tab.hash)`得到`0x615f3d8a`，跟我们在ELF文件里面抽出来的值是相对应的。
-
-#### 小结
-
 
 
 
