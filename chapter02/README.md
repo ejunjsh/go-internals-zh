@@ -1001,3 +1001,67 @@ go.itab.main.Adder,main.Mather SIZE: 40
 如果你有一些提示，不要犹豫提个issue吧。
 
 
+## 动态分派
+
+在本节中，我们将最终介绍接口的主要功能：动态分派。
+
+具体来说，我们将看看动态分派如何在底层工作，以及我们为此付出多少代价。
+
+### 接口上的间接方法调用
+
+让我们回顾一下前面的代码（[iface.go](https://github.com/teh-cmc/go-internals/blob/master/chapter2_interfaces/iface.go)）：
+
+````go
+type Mather interface {
+    Add(a, b int32) int32
+    Sub(a, b int64) int64
+}
+
+type Adder struct{ id int32 }
+//go:noinline
+func (adder Adder) Add(a, b int32) int32 { return a + b }
+//go:noinline
+func (adder Adder) Sub(a, b int64) int64 { return a - b }
+
+func main() {
+    m := Mather(Adder{id: 6754})
+    m.Add(10, 32)
+}
+````
+
+
+我们已经深入了解了这段代码中发生的大部分事情：`iface<Mather, Adder>`接口是如何创建的，它如何在最终的可执行文件中进行布局，以及它如何最终被运行时加载。
+
+我们只有一件事要看，那就是下面的实际间接方法调用：`m.Add(10, 32)`。
+
+为了更新我们的记忆，我们将放大接口的创建以及方法调用本身：
+
+````go
+m := Mather(Adder{id: 6754})
+m.Add(10, 32)
+````
+
+万幸的是，我们已经有了完整注释版本的汇编代码，这汇编代码的生成是为了实例化上面的第一行代码`m := Mather(Adder{id: 6754})`:
+
+````assembly
+;; m := Mather(Adder{id: 6754})
+0x001d MOVL	$6754, ""..autotmp_1+36(SP)         ;; create an addressable $6754 value at 36(SP)
+0x0025 LEAQ	go.itab."".Adder,"".Mather(SB), AX  ;; set up go.itab."".Adder,"".Mather..
+0x002c MOVQ	AX, (SP)                            ;; ..as first argument (tab *itab)
+0x0030 LEAQ	""..autotmp_1+36(SP), AX            ;; set up &36(SP)..
+0x0035 MOVQ	AX, 8(SP)                           ;; ..as second argument (elem unsafe.Pointer)
+0x003a CALL	runtime.convT2I32(SB)               ;; runtime.convT2I32(go.itab."".Adder,"".Mather, &$6754)
+0x003f MOVQ	16(SP), AX                          ;; AX now holds i.tab (go.itab."".Adder,"".Mather)
+0x0044 MOVQ	24(SP), CX                          ;; CX now holds i.data (&$6754, somewhere on the heap)
+````
+
+下面是间接方法调用`m.Add(10, 32)`的汇编代码:
+
+````assembly
+;; m.Add(10, 32)
+0x0049 MOVQ	24(AX), AX
+0x004d MOVQ	$137438953482, DX
+0x0057 MOVQ	DX, 8(SP)
+0x005c MOVQ	CX, (SP)
+0x0060 CALL	AX
+````
