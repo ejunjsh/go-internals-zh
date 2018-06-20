@@ -42,6 +42,14 @@ go version go1.10 linux/amd64
   - [创建一个接口](#%E5%88%9B%E5%BB%BA%E4%B8%80%E4%B8%AA%E6%8E%A5%E5%8F%A3)
     - [部分1:分配接收器](#%E9%83%A8%E5%88%861%E5%88%86%E9%85%8D%E6%8E%A5%E6%94%B6%E5%99%A8)
     - [部分2:组装itab](#%E9%83%A8%E5%88%862%E7%BB%84%E8%A3%85itab)
+    - [部分3:设置数据](#%E9%83%A8%E5%88%863%E8%AE%BE%E7%BD%AE%E6%95%B0%E6%8D%AE)
+  - [从可执行文件中重建`itab`](#%E4%BB%8E%E5%8F%AF%E6%89%A7%E8%A1%8C%E6%96%87%E4%BB%B6%E4%B8%AD%E9%87%8D%E5%BB%BAitab)
+    - [第1步：查找`.rodata`](#%E7%AC%AC1%E6%AD%A5%E6%9F%A5%E6%89%BErodata)
+    - [第二步：找到`.rodata`的虚拟内存地址(VMA)](#%E7%AC%AC%E4%BA%8C%E6%AD%A5%E6%89%BE%E5%88%B0rodata%E7%9A%84%E8%99%9A%E6%8B%9F%E5%86%85%E5%AD%98%E5%9C%B0%E5%9D%80vma)
+    - [第三步：查找`go.itab.main.Adder,main.Mather`的VMA和大小](#%E7%AC%AC%E4%B8%89%E6%AD%A5%E6%9F%A5%E6%89%BEgoitabmainaddermainmather%E7%9A%84vma%E5%92%8C%E5%A4%A7%E5%B0%8F)
+    - [第四步：查找和抽取`go.itab.main.Adder,main.Mather`](#%E7%AC%AC%E5%9B%9B%E6%AD%A5%E6%9F%A5%E6%89%BE%E5%92%8C%E6%8A%BD%E5%8F%96goitabmainaddermainmather)
+    - [小结](#%E5%B0%8F%E7%BB%93)
+    - [奖励](#%E5%A5%96%E5%8A%B1)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
 
@@ -966,8 +974,30 @@ $ objdump -t -j .text iface.bin | grep 000000000044c350
 
 事实上，还是有点惊喜的：我们从来没有定义两个指针接收器的方法。
 
-编译器生成包装
+编译器已经为我们生成了这些包装器方法（正如我们在“[隐式解引用](#%E9%9A%90%E5%BC%8F%E8%A7%A3%E5%BC%95%E7%94%A8)”一节中所描述的那样），因为它知道我们需要它们：自从一个接口结构里面只含有指针，并且自从我们`Adder`实现上述接口只为方法提供值接收器，如果我们要通过接口的虚拟表调用这些方法中的任何一个，我们必须在某个时候通过一个包装器。
 
+这应该已经给你一个关于如何在运行时处理动态分派的好主意; 这是我们将在下一节中看到的。
 
+#### 奖励
+
+我已经破解了一个通用的bash脚本，您可以使用它来转储ELF文件（[dump_sym.sh](https://github.com/teh-cmc/go-internals/blob/master/chapter2_interfaces/dump_sym.sh)）的任何部分中的任何符号的内容：
+
+````shell
+# ./dump_sym.sh bin_path section_name sym_name
+$ ./dump_sym.sh iface.bin .rodata go.itab.main.Adder,main.Mather
+.rodata file-offset: 315392
+.rodata VMA: 4509696
+go.itab.main.Adder,main.Mather VMA: 4673856
+go.itab.main.Adder,main.Mather SIZE: 40
+
+0000000 bd20 0045 0000 0000 ed40 0045 0000 0000
+0000010 3d8a 615f 0000 0000 c2d0 0044 0000 0000
+0000020 c350 0044 0000 0000                    
+0000028
+````
+
+我会想象一定有一种更简单的方法来实现这个脚本的功能，也许有一些神秘的标记或者隐秘的宝石(gem)隐藏在`binutils`发行版中的..谁知道。
+
+如果你有一些提示，不要犹豫提个issue吧。
 
 
