@@ -1065,3 +1065,11 @@ m.Add(10, 32)
 0x005c MOVQ	CX, (SP)
 0x0060 CALL	AX
 ````
+
+根据之前章节知识的积累，这些指令应该很好理解了。
+
+````assembly
+0x0049 MOVQ	24(AX), AX
+````
+
+一旦`runtime.convT2I32`返回，`AX`就保存了`i.tab`的值，
