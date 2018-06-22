@@ -50,6 +50,8 @@ go version go1.10 linux/amd64
     - [第四步：查找和抽取`go.itab.main.Adder,main.Mather`](#%E7%AC%AC%E5%9B%9B%E6%AD%A5%E6%9F%A5%E6%89%BE%E5%92%8C%E6%8A%BD%E5%8F%96goitabmainaddermainmather)
     - [小结](#%E5%B0%8F%E7%BB%93)
     - [奖励](#%E5%A5%96%E5%8A%B1)
+- [动态分派](#%E5%8A%A8%E6%80%81%E5%88%86%E6%B4%BE)
+  - [接口上的间接方法调用](#%E6%8E%A5%E5%8F%A3%E4%B8%8A%E7%9A%84%E9%97%B4%E6%8E%A5%E6%96%B9%E6%B3%95%E8%B0%83%E7%94%A8)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
 
@@ -1072,4 +1074,64 @@ m.Add(10, 32)
 0x0049 MOVQ	24(AX), AX
 ````
 
-一旦`runtime.convT2I32`返回，`AX`就保存了`i.tab`的值，
+一旦`runtime.convT2I32`返回，`AX`就保存了`i.tab`的值，`i.tab`就是我们知道的指向`itab`的指针；在这里特指指向`go.itab."".Adder,"".Mather`的指针。
+
+通过解引用`AX`和向前偏移24个字节，我们到达了`i.tab.fun`，这个对应的是虚拟表的第一个方法。
+
+下面是一个带有`itab`的偏移表的代码：
+````go
+type itab struct { // 32 bytes on a 64bit arch
+    inter *interfacetype // offset 0x00 ($00)
+    _type *_type	 // offset 0x08 ($08)
+    hash  uint32	 // offset 0x10 ($16)
+    _     [4]byte	 // offset 0x14 ($20)
+    fun   [1]uintptr	 // offset 0x18 ($24)
+			 // offset 0x20 ($32)
+}
+````
+
+正如我们在之前从可执行文件中重建`itab`的章节中看到，`iface.tab.fun[0]`是一个指向`main.(*Adder).add`的指针，它是由编译器生成的包装方法，包装了我们原来的值接收方法`main.Adder.add`。
+
+````assembly
+0x004d MOVQ	$137438953482, DX
+0x0057 MOVQ	DX, 8(SP)
+````
+
+我们保存`10`和`32`到栈顶，作为方法的第二和第三个参数。
+
+````assembly
+0x005c MOVQ	CX, (SP)
+0x0060 CALL	AX
+````
+
+一旦`runtime.convT2I32`返回，`CX`保存了`i.data`的值，它是一个指向`Adder`实例的指针。
+
+我们把这个指针放到栈顶，作为方法的第一个参数，用来满足调用的约定：方法的接收器应该一直被传递作为第一个参数。
+
+最后，栈准备好了，我们可以开始调用了。
+
+我们以一个完整注释的汇编来结束这一节，它很好的解释了整个过程:
+
+````assembly
+;; m := Mather(Adder{id: 6754})
+0x001d MOVL	$6754, ""..autotmp_1+36(SP)         ;; create an addressable $6754 value at 36(SP)
+0x0025 LEAQ	go.itab."".Adder,"".Mather(SB), AX  ;; set up go.itab."".Adder,"".Mather..
+0x002c MOVQ	AX, (SP)                            ;; ..as first argument (tab *itab)
+0x0030 LEAQ	""..autotmp_1+36(SP), AX            ;; set up &36(SP)..
+0x0035 MOVQ	AX, 8(SP)                           ;; ..as second argument (elem unsafe.Pointer)
+0x003a CALL	runtime.convT2I32(SB)               ;; runtime.convT2I32(go.itab."".Adder,"".Mather, &$6754)
+0x003f MOVQ	16(SP), AX                          ;; AX now holds i.tab (go.itab."".Adder,"".Mather)
+0x0044 MOVQ	24(SP), CX                          ;; CX now holds i.data (&$6754, somewhere on the heap)
+;; m.Add(10, 32)
+0x0049 MOVQ	24(AX), AX                          ;; AX now holds (*iface.tab)+0x18, i.e. iface.tab.fun[0]
+0x004d MOVQ	$137438953482, DX                   ;; move (32,10) to..
+0x0057 MOVQ	DX, 8(SP)                           ;; ..the top of the stack (arguments #3 & #2)
+0x005c MOVQ	CX, (SP)                            ;; CX, which holds &$6754 (i.e., our receiver), gets moved to
+                                                    ;; ..the top of stack (argument #1 -> receiver)
+0x0060 CALL	AX                                  ;; you know the drill
+````
+
+我们现在对于接口的原理还是虚拟方法调用是怎么工作的已经有一个清晰印象了。
+
+在下一节，我们会用理论和实践来衡量这原理的代价。
+
