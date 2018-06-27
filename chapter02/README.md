@@ -1320,7 +1320,7 @@ BenchmarkMethodCall_interface/single/noinline         	2000000000	         1.96 
       12.709412950 seconds time elapsed
 ````
 
-这结果跟我们预期的一致："接口"版本确实慢了一点，每个迭代接近0.15的额外纳秒花销，或者性能下降了~8%
+这结果跟我们预期的一致："接口"版本确实慢了一点，每个迭代接近0.15的额外纳秒开销，或者性能下降了~8%
 
 8%可能听起来像是一个明显的差异，但我们必须记住，A）这些是纳秒级的测量 B）被调用的方法做得很少，它放大了调用的开销。
 
@@ -1398,7 +1398,7 @@ BenchmarkMethodCall_direct/single/inline         	2000000000	         0.34 ns/op
        2.464386341 seconds time elapsed
 ````
 
-预料之中，非常快，调用的花销已经没有了。
+预料之中，非常快，调用的开销已经没有了。
 
 对于"直接"版本0.34ns/op，"接口"版本现在是慢了约475%，与我们之前在禁用内联功能时测量的约8％的差异相比急剧下降。
 
@@ -1545,4 +1545,186 @@ MethodCall_direct/many/noinline/random_incr/call      30.8ns ± 0% # 30.8 - 8.8 
 这里真的没有什么惊喜：
 
 1. `small_incr`：通过对缓存非常友好，我们获得了与之前在单个实例上循环测试的类似结果。
-2. `big_incr`：
+2. `big_incr`：通过强制CPU在每次迭代时获取新的缓存行，我们确实看到了明显的延迟波动，这与调用的成本完全无关，但是约6ns属于基线，其余的包含了解引用获得`id`字段和拷贝返回值加在一起的成本。
+3. `random_incr`：跟`big_incr`差不多，但是比它多了A)伪随机访问 B) 获取预先计算好的索引数组的下一个索引的成本（这会触发其缓存不命中和本身）
+
+正如逻辑所指出的那样，CPU的d-cache的抖动似乎并没有以任何方式影响实际直接方法调用（内联或不内联）的延迟，尽管它确实使围绕它的一切都变得更慢。
+
+动态分派的结果如何呢？
+
+````shell
+$ go test -run=NONE -o iface_bench_test.bin iface_bench_test.go && \
+  benchstat <(
+    taskset 2 ./iface_bench_test.bin -test.cpu=1 -test.benchtime=1s -test.count=3 \
+      -test.bench='BenchmarkMethodCall_interface/many/inline')
+name                                                     time/op
+MethodCall_interface/many/noinline/small_incr/baseline   1.38ns ± 0%
+MethodCall_interface/many/noinline/small_incr/call       3.48ns ± 0% # 3.48 - 1.38 = 2.1ns
+MethodCall_interface/many/noinline/big_incr/baseline     6.86ns ± 0%
+MethodCall_interface/many/noinline/big_incr/call         19.6ns ± 1% # 19.6 - 6.86 = 12.74ns
+MethodCall_interface/many/noinline/random_incr/baseline  11.0ns ± 0%
+MethodCall_interface/many/noinline/random_incr/call      34.7ns ± 0% # 34.7 - 11.0 = 23.7ns
+````
+
+结果非常相似，尽管总体上稍慢一点，这是因为我们`identifier`在每次迭代中将两个四字（即一个接口的两个字段）从数组中复制出来，而不是一个（指向`id32`的指针）。
+
+这个运行的速度几乎与其“直接”对应的速度一样快，因为数组中的所有接口共享一个共同的`itab`（即它们都是`iface<Mather, Adder>`接口），它们相关的虚拟表永远不会离开L1d高速缓存，因此每次迭代提取正确的方法的指针几乎都是0成本的。
+
+同样，组成`main.(*id32).idNoInline`方法主体的指令也不会离开L1i缓存。
+
+有人可能会认为，在实践中，一组接口将包含许多不同的基础类型（和虚拟表），这将导致L1i和L1d高速缓存的抖动，这是由于各种虚拟表互相推挤造成的。
+
+虽然这在理论上是成立的，但这些想法往往是多年来使用旧版OOP语言（如C++）的经验的结果，（以前，至少）鼓励将深度嵌套的继承类和虚拟调用层次用作他们的主要抽象工具。
+
+在足够大的层次结构中，关联虚拟表的数量有时可能足够大，例如迭代一个持有各种虚拟类实现的数据结构的时候，会导致CPU缓存抖动，（可以考虑GUI框架，其中所有内容都是Widget存储在一个图形数据结构中）; 特别是至少在C++中，虚拟类倾向于指定相当复杂的行为，有时候会有十几种方法，从而导致相当大的虚拟表，并且给L1d缓存带来更大的压力。
+
+Go,从另一方面来说，非常不同：OOP已经完全抛弃，类型系统变得平坦起来，并且接口通常被用来描述最小的，受限制的行为（一些方法最多是平均的，接口隐式满足的事实），而不是在更复杂的分层类型层次结构之上用作抽象。
+
+在实践中，用Go来写代码，我发现很少去遍历一组包含许多不同基础类型的接口。YMMV，当然。
+
+对于好奇心强的人来说，以下是启用内联的“直接”版本的结果：
+
+````go
+name                                                time/op
+MethodCall_direct/many/inline/small_incr            0.97ns ± 1% # 0.97ns
+MethodCall_direct/many/inline/big_incr/baseline     5.96ns ± 1%
+MethodCall_direct/many/inline/big_incr/call         11.9ns ± 1% # 11.9 - 5.96 = 5.94ns
+MethodCall_direct/many/inline/random_incr/baseline  9.20ns ± 1%
+MethodCall_direct/many/inline/random_incr/call      16.9ns ± 1% # 16.9 - 9.2 = 7.7ns
+````
+
+在编译器能够内联该调用的情况下，这将使“直接”版本比“接口”版本快2至3倍。
+
+再次，正如我们前面提到的，当前编译器在内联方面的有限能力意味着，在实践中，这些胜利很少被看到。当然，经常有些时候你真的没有选择，只能依靠虚拟调用。
+
+
+##### 结论
+
+有效地测量虚拟调用的延迟是一项相当复杂的工作，因为其中大部分是由于现代硬件的非常复杂的实施细节导致的许多交织副作用的直接后果。
+
+在Go中，由于语言设计鼓励使用的习语，并考虑到编译器关于内联的（当前）局限性，所以可以有效地将动态分派视为几乎没有任何开销。
+
+尽管如此，如果有疑问，人们应该总是测量他们的热门路径，并查看相关的绩效指标，以确定地断言动态分派是否最终成为问题。
+
+（注意：我们将在本书后面的章节中看看编译器的内联功能。）
+
+
+## 特殊情况和编译器技巧
+
+本节将回顾我们在处理接口时每天遇到的一些最常见的特例。
+
+现在，您应该对接口的工作方式有一个非常清晰的概念，所以我们会尽量在这里简明扼要地介绍一下。
+
+### 空接口
+
+空接口的数据结构是：`iface`没有`itab`，这应该跟你直觉一样吧。
+
+有两个原因：
+
+1. 由于空接口没有方法，因此与动态分配相关的所有内容都可以安全地从数据结构中删除。
+2. 随着虚拟表不见了，空接口本身的类型，始终是相同的，不要被它保存的数据的类型迷惑，（即我们谈论的是这个空接口，而不是一个空接口）。
+
+注意：类似于我们使用的符号`iface`，我们用`eface<T>`表示保存类型T的空接口。
+
+`eface`是根类型,代表了运行时的空接口（[src/runtime/runtime2.go](https://github.com/golang/go/blob/bf86aec25972f3a100c3aa58a6abcbcc35bdea49/src/runtime/runtime2.go#L148-L151)）。
+
+其定义如下所示：
+
+````go
+type eface struct { // 16 bytes on a 64bit arch
+    _type *_type
+    data  unsafe.Pointer
+}
+````
+
+其中`_type`保存了`data`指针所指向的值的类型信息。
+正如预期的那样，`itab`完全被抛弃了。
+
+虽然空的接口可以重用数据`iface`结构（它毕竟是`eface`的超集），但运行时选择区分这两个主要原因：空间效率和代码清晰度。
+
+### 持有标量类型的接口
+
+在前面的章节（[#接口解剖](#%E6%95%B0%E6%8D%AE%E7%BB%93%E6%9E%84%E6%A6%82%E8%BF%B0)）,我们已经提到，即使将一个简单的标量类型（如整数）存储到接口中也会导致堆分配。
+
+是时候看看为什么会这样了。
+
+考虑下这两个基准测试([eface_scalar_test.go](https://github.com/teh-cmc/go-internals/blob/master/chapter2_interfaces/eface_scalar_test.go)):
+
+````go
+func BenchmarkEfaceScalar(b *testing.B) {
+    var Uint uint32
+    b.Run("uint32", func(b *testing.B) {
+        for i := 0; i < b.N; i++ {
+            Uint = uint32(i)
+        }
+    })
+    var Eface interface{}
+    b.Run("eface32", func(b *testing.B) {
+        for i := 0; i < b.N; i++ {
+            Eface = uint32(i)
+        }
+    })
+}
+````
+````shell
+$ go test -benchmem -bench=. ./eface_scalar_test.go
+BenchmarkEfaceScalar/uint32-8         	2000000000	   0.54 ns/op	  0 B/op     0 allocs/op
+BenchmarkEfaceScalar/eface32-8        	 100000000	   12.3 ns/op	  4 B/op     1 allocs/op
+````
+
+1. 对于一个简单的赋值操作，这是一个2个数量级的性能差异
+2. 我们可以看到第二个基准测试必须在每次迭代中分配4个额外的字节。
+
+显然，在第二种情况下，一些隐藏的重型机械正在起步：我们需要看看生成的汇编。
+
+对于第一个基准测试，编译器完全按照您对赋值操作的期望进行生成：
+
+````assembly
+;; Uint = uint32(i)
+0x000d MOVL	DX, (AX)
+````
+
+然而，在第二个基准中，事情变得更加复杂：
+
+````assembly
+;; Eface = uint32(i)
+0x0050 MOVL	CX, ""..autotmp_3+36(SP)
+0x0054 LEAQ	type.uint32(SB), AX
+0x005b MOVQ	AX, (SP)
+0x005f LEAQ	""..autotmp_3+36(SP), DX
+0x0064 MOVQ	DX, 8(SP)
+0x0069 CALL	runtime.convT2E32(SB)
+0x006e MOVQ	24(SP), AX
+0x0073 MOVQ	16(SP), CX
+0x0078 MOVQ	"".&Eface+48(SP), DX
+0x007d MOVQ	CX, (DX)
+0x0080 MOVL	runtime.writeBarrier(SB), CX
+0x0086 LEAQ	8(DX), DI
+0x008a TESTL	CX, CX
+0x008c JNE	148
+0x008e MOVQ	AX, 8(DX)
+0x0092 JMP	46
+0x0094 CALL	runtime.gcWriteBarrier(SB)
+0x0099 JMP	46
+````
+
+这只是赋值，不是完全的基准测试！
+
+我们先一点点的去学这个代码吧。
+
+#### 创建接口
+
+````assembly
+0x0050 MOVL	CX, ""..autotmp_3+36(SP)
+0x0054 LEAQ	type.uint32(SB), AX
+0x005b MOVQ	AX, (SP)
+0x005f LEAQ	""..autotmp_3+36(SP), DX
+0x0064 MOVQ	DX, 8(SP)
+0x0069 CALL	runtime.convT2E32(SB)
+0x006e MOVQ	24(SP), AX
+0x0073 MOVQ	16(SP), CX
+````
+
+
+
+
