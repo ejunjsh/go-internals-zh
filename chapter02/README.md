@@ -52,6 +52,11 @@ go version go1.10 linux/amd64
     - [奖励](#%E5%A5%96%E5%8A%B1)
 - [动态分派](#%E5%8A%A8%E6%80%81%E5%88%86%E6%B4%BE)
   - [接口上的间接方法调用](#%E6%8E%A5%E5%8F%A3%E4%B8%8A%E7%9A%84%E9%97%B4%E6%8E%A5%E6%96%B9%E6%B3%95%E8%B0%83%E7%94%A8)
+  - [性能开销](#%E6%80%A7%E8%83%BD%E5%BC%80%E9%94%80)
+    - [理论：快速浏览一下现代CPU](#%E7%90%86%E8%AE%BA%E5%BF%AB%E9%80%9F%E6%B5%8F%E8%A7%88%E4%B8%80%E4%B8%8B%E7%8E%B0%E4%BB%A3cpu)
+    - [实践：基准测试](#%E5%AE%9E%E8%B7%B5%E5%9F%BA%E5%87%86%E6%B5%8B%E8%AF%95)
+      - [基准测试A：一个实例，很多调用，内联和非内联](#%E5%9F%BA%E5%87%86%E6%B5%8B%E8%AF%95a%E4%B8%80%E4%B8%AA%E5%AE%9E%E4%BE%8B%E5%BE%88%E5%A4%9A%E8%B0%83%E7%94%A8%E5%86%85%E8%81%94%E5%92%8C%E9%9D%9E%E5%86%85%E8%81%94)
+      - [基准测试B：许多实例，许多非内联调用，小/大/伪随机迭代](#%E5%9F%BA%E5%87%86%E6%B5%8B%E8%AF%95b%E8%AE%B8%E5%A4%9A%E5%AE%9E%E4%BE%8B%E8%AE%B8%E5%A4%9A%E9%9D%9E%E5%86%85%E8%81%94%E8%B0%83%E7%94%A8%E5%B0%8F%E5%A4%A7%E4%BC%AA%E9%9A%8F%E6%9C%BA%E8%BF%AD%E4%BB%A3)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
 
@@ -1173,7 +1178,7 @@ type itab struct { // 32 bytes on a 64bit arch
 
 所以我们衡量一下这个东西吧
 
-#### 实践：性能测试
+#### 实践：基准测试
 
 首先，看一下我们cpu的信息：
 
@@ -1182,7 +1187,7 @@ $ lscpu | sed -nr '/Model name/ s/.*:\s*(.* @ .*)/\1/p'
 Intel(R) Core(TM) i7-7700HQ CPU @ 2.80GHz
 ````
 
-我们会定义一个接口[](https://github.com/teh-cmc/go-internals/blob/master/chapter2_interfaces/iface_bench_test.go)来作为性能测试的例子：
+我们会定义一个接口[](https://github.com/teh-cmc/go-internals/blob/master/chapter2_interfaces/iface_bench_test.go)来作为基准测试的例子：
 
 ````go
 type identifier interface {
@@ -1200,9 +1205,9 @@ func (id *id32) idInline() int32 { return id.id }
 func (id *id32) idNoInline() int32 { return id.id }
 ````
 
-##### 性能测试A：一个实例，很多调用，内联和非内联
+##### 基准测试A：一个实例，很多调用，内联和非内联
 
-对于我们第一个性能测试，我们会分别用`*Adder`值和`iface<Mather, *Adder>`接口在一个忙循环里面调用非内联方法：
+对于我们第一个基准测试，我们会分别用`*Adder`值和`iface<Mather, *Adder>`接口在一个忙循环里面调用非内联方法：
 
 ````go
 var escapeMePlease *id32
@@ -1255,12 +1260,289 @@ func BenchmarkMethodCall_interface(b *testing.B) {
 
 我们期望上面两个测试，A)非常快，B)速度几乎一样
 
+考虑到循环的紧凑性，我们能够预测到这两个测试它们的数据（接收器和虚拟表）和指令（`"".(*id32).idNoInline`）在每个循环迭代已经缓存到CPU的L1d/L1i缓存中，也就是说，性能应该纯粹是CPU限制的。
+
+`BenchmarkMethodCall_interface`应该运行得慢一点（在纳秒级），因为它必须处理从虚拟表（尽管它已经在L1缓存中）中查找和复制正确指针的开销。
+
+由于`CALL CX`指令很强依赖于额外一些指令，一些需要查询虚拟表的指令的输出，所以处理器没办法只好执行额外的一些逻辑序列流，错过了指令级在表上的并行化机会。
+
+这最后为什么我们会觉得"接口"会慢一点的主要原因。
+
+下面是"直接"版本的结果：
+
+````shell
+$ go test -run=NONE -o iface_bench_test.bin iface_bench_test.go && \
+  perf stat --cpu=1 \
+  taskset 2 \
+  ./iface_bench_test.bin -test.cpu=1 -test.benchtime=1s -test.count=3 \
+      -test.bench='BenchmarkMethodCall_direct/single/noinline'
+BenchmarkMethodCall_direct/single/noinline         	2000000000	         1.81 ns/op
+BenchmarkMethodCall_direct/single/noinline         	2000000000	         1.80 ns/op
+BenchmarkMethodCall_direct/single/noinline         	2000000000	         1.80 ns/op
+
+ Performance counter stats for 'CPU(s) 1':
+
+      11702.303843      cpu-clock (msec)          #    1.000 CPUs utilized          
+             2,481      context-switches          #    0.212 K/sec                  
+                 1      cpu-migrations            #    0.000 K/sec                  
+             7,349      page-faults               #    0.628 K/sec                  
+    43,726,491,825      cycles                    #    3.737 GHz                    
+   110,979,100,648      instructions              #    2.54  insn per cycle         
+    19,646,440,556      branches                  # 1678.852 M/sec                  
+           566,424      branch-misses             #    0.00% of all branches        
+
+      11.702332281 seconds time elapsed
+````
+
+和下面是"接口"版本的结果：
+
+````shell
+$ go test -run=NONE -o iface_bench_test.bin iface_bench_test.go && \
+  perf stat --cpu=1 \
+  taskset 2 \
+  ./iface_bench_test.bin -test.cpu=1 -test.benchtime=1s -test.count=3 \
+      -test.bench='BenchmarkMethodCall_interface/single/noinline'
+BenchmarkMethodCall_interface/single/noinline         	2000000000	         1.95 ns/op
+BenchmarkMethodCall_interface/single/noinline         	2000000000	         1.96 ns/op
+BenchmarkMethodCall_interface/single/noinline         	2000000000	         1.96 ns/op
+
+ Performance counter stats for 'CPU(s) 1':
+
+      12709.383862      cpu-clock (msec)          #    1.000 CPUs utilized          
+             3,003      context-switches          #    0.236 K/sec                  
+                 1      cpu-migrations            #    0.000 K/sec                  
+            10,524      page-faults               #    0.828 K/sec                  
+    47,301,533,147      cycles                    #    3.722 GHz                    
+   124,467,105,161      instructions              #    2.63  insn per cycle         
+    19,878,711,448      branches                  # 1564.097 M/sec                  
+           761,899      branch-misses             #    0.00% of all branches        
+
+      12.709412950 seconds time elapsed
+````
+
+这结果跟我们预期的一致："接口"版本确实慢了一点，每个迭代接近0.15的额外纳秒花销，或者性能下降了~8%
+
+8%可能听起来像是一个明显的差异，但我们必须记住，A）这些是纳秒级的测量 B）被调用的方法做得很少，它放大了调用的开销。
+
+看看每个基准测试的指令数量，我们发现基于接口的版本不得不执行与“直接”版本（`110,979,100,648`vs. `124,467,105,161`）相比更多的140亿条指令，尽管这两个基准测试都是针对`6,000,000,000`（`2,000,000,000\*3`）迭代运行的。
+
+正如我们之前提到的，CPU不能并行化这些额外的指令，因为`CALL`依赖这些指令，这很明显的反映在每周期指令率(instruction-per-cycle ratio):这两个测试都有类似的IPC率（`2.54` vs. `2.63`）,尽管"接口"版本总的来说要做更多事。
+
+"接口"版本并行化的缺乏累计起来就是额外大约35亿CPU周期，这应该是我们测量的0.15纳秒花费在的地方。
+
+现在，我们让编译器内联方法调用，看看会发生什么？
+
+````go
+var myID int32
+
+func BenchmarkMethodCall_direct(b *testing.B) {
+    b.Run("single/inline", func(b *testing.B) {
+        m := escapeToHeap(&id32{id: 6754}).(*id32)
+        b.ResetTimer()
+        for i := 0; i < b.N; i++ {
+            // MOVL (DX), SI
+            // MOVL SI, (CX)
+            myID = m.idInline()
+        }
+    })
+}
+
+func BenchmarkMethodCall_interface(b *testing.B) {
+    b.Run("single/inline", func(b *testing.B) {
+        m := escapeToHeap(&id32{id: 6754})
+        b.ResetTimer()
+        for i := 0; i < b.N; i++ {
+            // MOVQ 32(AX), CX
+            // MOVQ "".m.data+40(SP), DX
+            // MOVQ DX, (SP)
+            // CALL CX
+            // MOVL 8(SP), AX
+            // MOVQ "".&myID+48(SP), CX
+            // MOVL AX, (CX)
+            myID = m.idNoInline()
+        }
+    })
+}
+````
+
+两个事情：
+
+* `BenchmarkMethodCall_direct`: 由于内联，调用已经减少到一对简单的内存移动。
+* `BenchmarkMethodCall_interface`: 由于动态分派，编译器无法内联该调用，因此生成的程序集与以前完全相同。
+
+由于`BenchmarkMethodCall_interface`代码没有改变，所以没必要看它的测试了
+
+所以让我们看看"直接"版本的吧：
+
+````shell
+$ go test -run=NONE -o iface_bench_test.bin iface_bench_test.go && \
+  perf stat --cpu=1 \
+  taskset 2 \
+  ./iface_bench_test.bin -test.cpu=1 -test.benchtime=1s -test.count=3 \
+      -test.bench='BenchmarkMethodCall_direct/single/inline'
+BenchmarkMethodCall_direct/single/inline         	2000000000	         0.35 ns/op
+BenchmarkMethodCall_direct/single/inline         	2000000000	         0.34 ns/op
+BenchmarkMethodCall_direct/single/inline         	2000000000	         0.34 ns/op
+
+ Performance counter stats for 'CPU(s) 1':
+
+       2464.353001      cpu-clock (msec)          #    1.000 CPUs utilized          
+               629      context-switches          #    0.255 K/sec                  
+                 1      cpu-migrations            #    0.000 K/sec                  
+             7,322      page-faults               #    0.003 M/sec                  
+     9,026,867,915      cycles                    #    3.663 GHz                    
+    41,580,825,875      instructions              #    4.61  insn per cycle         
+     7,027,066,264      branches                  # 2851.485 M/sec                  
+         1,134,955      branch-misses             #    0.02% of all branches        
+
+       2.464386341 seconds time elapsed
+````
+
+预料之中，非常快，调用的花销已经没有了。
+
+对于"直接"版本0.34ns/op，"接口"版本现在是慢了约475%，与我们之前在禁用内联功能时测量的约8％的差异相比急剧下降。
+
+注意，由于方法调用的固有分支已经消失，CPU能够更高效地并行化并推测性地执行其余指令，从而使IPC比率达到4.61。
 
 
+##### 基准测试B：许多实例，许多非内联调用，小/大/伪随机迭代
 
+对于这个第二个基准测试，我们将看到更类似现实世界的情况，其中迭代器遍历一组(slice)对象，这些对象都公开一个公用方法，并为每个对象调用它。
 
+为了更好地模拟现实，我们将禁用内联，因为在真正的程序中调用这种方法的大多数方法很可能非常复杂，不会被编译器内联（YMMV;这是一个很好的反例 - 来自标准库接口`sort.Interface`）。
 
+我们将定义3个类似的测试，它们访问这组对象的方式有所不同; 目标是模拟高速缓存友好性的下降级别：
 
+1. 在第一种情况下，迭代器按顺序遍历数组，调用方法，然后在每次迭代时增加一个对象的大小。
+2. 在第二种情况下，迭代器仍按顺序遍历数组，但这次会增加一个大于单个缓存行大小的值。
+3. 最后，在第三种情况下，迭代器将伪随机遍历数组。
 
+在这三种情况下，我们都要确保数组足够大，不能完全适合任何处理器的缓存，以便模拟（不太准确）非常繁忙的服务器，这种服务器会给CPU高速缓存和主内存很大压力。
 
+下面简要回顾处理器的属性，我们会根据这个设计基准测试：
 
+````shell
+$ lscpu | sed -nr '/Model name/ s/.*:\s*(.* @ .*)/\1/p'
+Intel(R) Core(TM) i7-7700HQ CPU @ 2.80GHz
+$ lscpu | grep cache
+L1d cache:           32K
+L1i cache:           32K
+L2 cache:            256K
+L3 cache:            6144K
+$ getconf LEVEL1_DCACHE_LINESIZE
+64
+$ getconf LEVEL1_ICACHE_LINESIZE
+64
+$ find /sys/devices/system/cpu/cpu0/cache/index{1,2,3} -name "shared_cpu_list" -exec cat {} \;
+# (annotations are mine)
+0,4 # L1 (hyperthreading)
+0,4 # L2 (hyperthreading)
+0-7 # L3 (shared + hyperthreading)
+````
+
+以下是“直接”版本的基准测试套件的代码（基准标记为`baseline`计算单独检索接收器的成本，以便我们可以从最终测量结果中减去该成本）：
+
+````go
+const _maxSize = 2097152             // 2^21
+const _maxSizeModMask = _maxSize - 1 // avoids a mod (%) in the hot path
+
+var _randIndexes = [_maxSize]int{}
+func init() {
+    rand.Seed(42)
+    for i := range _randIndexes {
+        _randIndexes[i] = rand.Intn(_maxSize)
+    }
+}
+
+func BenchmarkMethodCall_direct(b *testing.B) {
+    adders := make([]*id32, _maxSize)
+    for i := range adders {
+        adders[i] = &id32{id: int32(i)}
+    }
+    runtime.GC()
+
+    var myID int32
+
+    b.Run("many/noinline/small_incr", func(b *testing.B) {
+        var m *id32
+        b.Run("baseline", func(b *testing.B) {
+            for i := 0; i < b.N; i++ {
+                m = adders[i&_maxSizeModMask]
+            }
+        })
+        b.Run("call", func(b *testing.B) {
+            for i := 0; i < b.N; i++ {
+                m = adders[i&_maxSizeModMask]
+                myID = m.idNoInline()
+            }
+        })
+    })
+    b.Run("many/noinline/big_incr", func(b *testing.B) {
+        var m *id32
+        b.Run("baseline", func(b *testing.B) {
+            j := 0
+            for i := 0; i < b.N; i++ {
+                m = adders[j&_maxSizeModMask]
+                j += 32
+            }
+        })
+        b.Run("call", func(b *testing.B) {
+            j := 0
+            for i := 0; i < b.N; i++ {
+                m = adders[j&_maxSizeModMask]
+                myID = m.idNoInline()
+                j += 32
+            }
+        })
+    })
+    b.Run("many/noinline/random_incr", func(b *testing.B) {
+        var m *id32
+        b.Run("baseline", func(b *testing.B) {
+            for i := 0; i < b.N; i++ {
+                m = adders[_randIndexes[i&_maxSizeModMask]]
+            }
+        })
+        b.Run("call", func(b *testing.B) {
+            for i := 0; i < b.N; i++ {
+                m = adders[_randIndexes[i&_maxSizeModMask]]
+                myID = m.idNoInline()
+            }
+        })
+    })
+}
+````
+
+“接口”版本的基准测试组是相同的，除了数组是用接口值而不是指向具体类型的指针进行初始化的，正如人们所期望的那样：
+
+````go
+func BenchmarkMethodCall_interface(b *testing.B) {
+    adders := make([]identifier, _maxSize)
+    for i := range adders {
+        adders[i] = identifier(&id32{id: int32(i)})
+    }
+    runtime.GC()
+
+    /* ... */
+}
+````
+
+下面是"直接"版本的测试结果：
+
+````shell
+$ go test -run=NONE -o iface_bench_test.bin iface_bench_test.go && \
+  benchstat <(
+    taskset 2 ./iface_bench_test.bin -test.cpu=1 -test.benchtime=1s -test.count=3 \
+      -test.bench='BenchmarkMethodCall_direct/many/noinline')
+name                                                  time/op
+MethodCall_direct/many/noinline/small_incr/baseline   0.99ns ± 3%
+MethodCall_direct/many/noinline/small_incr/call       2.32ns ± 1% # 2.32 - 0.99 = 1.33ns
+MethodCall_direct/many/noinline/big_incr/baseline     5.86ns ± 0%
+MethodCall_direct/many/noinline/big_incr/call         17.1ns ± 1% # 17.1 - 5.86 = 11.24ns
+MethodCall_direct/many/noinline/random_incr/baseline  8.80ns ± 0%
+MethodCall_direct/many/noinline/random_incr/call      30.8ns ± 0% # 30.8 - 8.8 = 22ns
+````
+
+这里真的没有什么惊喜：
+
+1. `small_incr`：通过对缓存非常友好，我们获得了与之前在单个实例上循环测试的类似结果。
+2. `big_incr`：
