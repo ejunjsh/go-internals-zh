@@ -57,6 +57,11 @@ go version go1.10 linux/amd64
     - [实践：基准测试](#%E5%AE%9E%E8%B7%B5%E5%9F%BA%E5%87%86%E6%B5%8B%E8%AF%95)
       - [基准测试A：一个实例，很多调用，内联和非内联](#%E5%9F%BA%E5%87%86%E6%B5%8B%E8%AF%95a%E4%B8%80%E4%B8%AA%E5%AE%9E%E4%BE%8B%E5%BE%88%E5%A4%9A%E8%B0%83%E7%94%A8%E5%86%85%E8%81%94%E5%92%8C%E9%9D%9E%E5%86%85%E8%81%94)
       - [基准测试B：许多实例，许多非内联调用，小/大/伪随机迭代](#%E5%9F%BA%E5%87%86%E6%B5%8B%E8%AF%95b%E8%AE%B8%E5%A4%9A%E5%AE%9E%E4%BE%8B%E8%AE%B8%E5%A4%9A%E9%9D%9E%E5%86%85%E8%81%94%E8%B0%83%E7%94%A8%E5%B0%8F%E5%A4%A7%E4%BC%AA%E9%9A%8F%E6%9C%BA%E8%BF%AD%E4%BB%A3)
+      - [结论](#%E7%BB%93%E8%AE%BA-1)
+- [特殊情况和编译器技巧](#%E7%89%B9%E6%AE%8A%E6%83%85%E5%86%B5%E5%92%8C%E7%BC%96%E8%AF%91%E5%99%A8%E6%8A%80%E5%B7%A7)
+  - [空接口](#%E7%A9%BA%E6%8E%A5%E5%8F%A3)
+  - [持有标量类型的接口](#%E6%8C%81%E6%9C%89%E6%A0%87%E9%87%8F%E7%B1%BB%E5%9E%8B%E7%9A%84%E6%8E%A5%E5%8F%A3)
+    - [创建接口](#%E5%88%9B%E5%BB%BA%E6%8E%A5%E5%8F%A3)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
 
@@ -1725,6 +1730,55 @@ BenchmarkEfaceScalar/eface32-8        	 100000000	   12.3 ns/op	  4 B/op     1 a
 0x0073 MOVQ	16(SP), CX
 ````
 
+该列表的第一部分实例化了空接口`eface<uint32>`,我们稍后将它分配给`Eface`。
 
+我们已经在关于创建接口的部分研究过类似的代码（[#创建一个接口](#%E5%88%9B%E5%BB%BA%E4%B8%80%E4%B8%AA%E6%8E%A5%E5%8F%A3)），除了这个代码在调用`runtime.convT2I32`而不是`runtime.convT2E32`; 尽管如此，这应该看起来很熟悉。
 
+事实证明，`runtime.convT2I32`和`runtime.convT2E32`都属于的一个更大的方法集，他们的工作就是从标量（或字符串或数组，或某种情况）来实例化一个指定的接口或空接口。
 
+这个方法集由10个符号组成，每个都是(`eface/iface, 16/32/64/string/slice`)的组合：
+
+````go
+// empty interface from scalar value
+func convT2E16(t *_type, elem unsafe.Pointer) (e eface) {}
+func convT2E32(t *_type, elem unsafe.Pointer) (e eface) {}
+func convT2E64(t *_type, elem unsafe.Pointer) (e eface) {}
+func convT2Estring(t *_type, elem unsafe.Pointer) (e eface) {}
+func convT2Eslice(t *_type, elem unsafe.Pointer) (e eface) {}
+
+// interface from scalar value
+func convT2I16(tab *itab, elem unsafe.Pointer) (i iface) {}
+func convT2I32(tab *itab, elem unsafe.Pointer) (i iface) {}
+func convT2I64(tab *itab, elem unsafe.Pointer) (i iface) {}
+func convT2Istring(tab *itab, elem unsafe.Pointer) (i iface) {}
+func convT2Islice(tab *itab, elem unsafe.Pointer) (i iface) {}
+````
+
+你会注意到没有`convT2E8`和`convT2I8`函数：这是因为编译器优化了。我们会在这章节结束再来看这个问题。
+
+所有这些函数都做几乎相同的事，不同的是他们的返回值(`iface`vs.`eface`)和分配到堆大内存大小。
+
+让我们看看`runtime.convT2E32`([src/runtime/iface.go](https://github.com/golang/go/blob/bf86aec25972f3a100c3aa58a6abcbcc35bdea49/src/runtime/iface.go#L308-L325))
+
+````go
+func convT2E32(t *_type, elem unsafe.Pointer) (e eface) {
+    /* ...omitted debug stuff... */
+    var x unsafe.Pointer
+    if *(*uint32)(elem) == 0 {
+        x = unsafe.Pointer(&zeroVal[0])
+    } else {
+        x = mallocgc(4, t, false)
+        *(*uint32)(x) = *(*uint32)(elem)
+    }
+    e._type = t
+    e.data = x
+    return
+}
+````
+
+这个函数初始化`eface`结构的`_type`字段，由调用者放在第一参数的位置"传递"进来的（记得：返回值都是在调用者它自己的栈帧中分配的）
+
+对于`eface`结构的`data`字段，它的值依赖于传进来的第二个参数`elem`的值:
+
+* 如果`elem`是零，`e.data`指向`runtime.zeroVal`,这是个特殊的全局变量，定义在运行时，代表了零值。在下一部分我们会讨论更多这个。
+* 如果`elem`非零，函数在堆中分配四个字节(`x = mallocgc(4, t, false)`),然后用指向`elem`的值的内容来初始化(`*(*uint32)(x) = *(*uint32)(elem)`),然后赋值进`e.data`。
