@@ -1717,7 +1717,7 @@ BenchmarkEfaceScalar/eface32-8        	 100000000	   12.3 ns/op	  4 B/op     1 a
 
 我们先一点点的去学这个代码吧。
 
-#### 创建接口
+#### 第一步：创建接口
 
 ````assembly
 0x0050 MOVL	CX, ""..autotmp_3+36(SP)
@@ -1782,3 +1782,93 @@ func convT2E32(t *_type, elem unsafe.Pointer) (e eface) {
 
 * 如果`elem`是零，`e.data`指向`runtime.zeroVal`,这是个特殊的全局变量，定义在运行时，代表了零值。在下一部分我们会讨论更多这个。
 * 如果`elem`非零，函数在堆中分配四个字节(`x = mallocgc(4, t, false)`),然后用指向`elem`的值的内容来初始化(`*(*uint32)(x) = *(*uint32)(elem)`),然后赋值进`e.data`。
+
+在这个情况，`e._type`保存`type.uint32`的地址（`LEAQ type.uint32(SB), AX`）,这个类型由标准库实现，所以类型地址只能在链接stdlib库时才能知道：
+
+````shell
+$ go tool nm eface_scalar_test.o | grep 'type\.uint32'
+         U type.uint32
+````
+
+(`U`表示这个符号还没有定义在目标文件里面，将由其他目标文件（在这个例子是标准库）在链接时提供)
+
+#### 赋值（部分1）
+
+````assembly
+0x0078 MOVQ	"".&Eface+48(SP), DX
+0x007d MOVQ	CX, (DX)		;; Eface._type = ret._type
+````
+
+`runtime.convT2E32`的结果赋值给我们的`Eface`变量，是吗？
+
+事实上，现在只有`_type`字段被赋值给`Eface._type`,`data`字段还没有赋值。
+
+#### 赋值（部分2）或者要求垃圾回收帮我们赋值
+
+````assembly
+0x0080 MOVL	runtime.writeBarrier(SB), CX
+0x0086 LEAQ	8(DX), DI	;; Eface.data = ret.data (indirectly via runtime.gcWriteBarrier)
+0x008a TESTL	CX, CX
+0x008c JNE	148
+0x008e MOVQ	AX, 8(DX)	;; Eface.data = ret.data (direct)
+0x0092 JMP	46
+0x0094 CALL	runtime.gcWriteBarrier(SB)
+0x0099 JMP	46
+````
+
+最后一块代码变得明显复杂了，是因为返回的`eface`的`data`指针分配到`Eface.data`的副作用：自从我们正在计算我们程序的内存图谱的时候（例如哪个部分的内存保存了哪个部分内存的引用），我们可能需要通知垃圾回收关于内存的改变，在这情况下，垃圾回收当前正在后台运行。
+
+这被我们称之为写屏障，是Go并发垃圾回收的直接后果。
+
+如果你有些模糊，不用担心，本书的下一章会提供一个Go的完整的垃圾回收讲解。
+
+现在，我们只要记住当我们看到汇编代码调用`runtime.gcWriteBarrier`,表示正在处理指针计算和通知垃圾回收器。
+
+总的来说，最后的一片代码只能做下面两件事之一：
+
+* 如果写屏障当前处于非活动状态，它直接把`ret.data`赋值给`Eface.data`(`MOVQ AX, 8(DX)`)。
+* 如果写屏障处于活动状态，它会礼貌地要求垃圾收集器帮我（`LEAQ 8(DX), DI`+ `CALL runtime.gcWriteBarrier(SB)`）进行赋值。
+
+（再次，现在尽量不要太担心这个。）
+
+瞧，我们有一个完整的接口，它拥有一个简单的标量类型（`uint32`）。
+
+#### 结论
+
+在实践中，绑定一个标量的值到一个接口是不常用的，基于各种理由，它可能是昂贵的操作，所以知道背后的原理是很重要的。
+
+说到开销，我们已经提及过在某些特殊情况，编译器实现了各种优化去避免分配一个接口。我们快速看看3个优化，作为本节的结尾吧。
+
+#### 接口优化1:字节大小的值
+
+考虑下面初始化一个`eface<uint8>`（[eface_scalar_test.go](https://github.com/teh-cmc/go-internals/blob/master/chapter2_interfaces/eface_scalar_test.go)）的基准测试:
+````go
+func BenchmarkEfaceScalar(b *testing.B) {
+    b.Run("eface8", func(b *testing.B) {
+        for i := 0; i < b.N; i++ {
+            // LEAQ    type.uint8(SB), BX
+            // MOVQ    BX, (CX)
+            // MOVBLZX AL, SI
+            // LEAQ    runtime.staticbytes(SB), R8
+            // ADDQ    R8, SI
+            // MOVL    runtime.writeBarrier(SB), R9
+            // LEAQ    8(CX), DI
+            // TESTL   R9, R9
+            // JNE     100
+            // MOVQ    SI, 8(CX)
+            // JMP     40
+            // MOVQ    AX, R9
+            // MOVQ    SI, AX
+            // CALL    runtime.gcWriteBarrier(SB)
+            // MOVQ    R9, AX
+            // JMP     40
+            Eface = uint8(i)
+        }
+    })
+}
+````
+
+````shell
+$ go test -benchmem -bench=BenchmarkEfaceScalar/eface8 ./eface_scalar_test.go
+BenchmarkEfaceScalar/eface8-8         	2000000000	   0.88 ns/op	  0 B/op     0 allocs/op
+````
