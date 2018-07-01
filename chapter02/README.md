@@ -61,7 +61,25 @@ go version go1.10 linux/amd64
 - [特殊情况和编译器技巧](#%E7%89%B9%E6%AE%8A%E6%83%85%E5%86%B5%E5%92%8C%E7%BC%96%E8%AF%91%E5%99%A8%E6%8A%80%E5%B7%A7)
   - [空接口](#%E7%A9%BA%E6%8E%A5%E5%8F%A3)
   - [持有标量类型的接口](#%E6%8C%81%E6%9C%89%E6%A0%87%E9%87%8F%E7%B1%BB%E5%9E%8B%E7%9A%84%E6%8E%A5%E5%8F%A3)
-    - [创建接口](#%E5%88%9B%E5%BB%BA%E6%8E%A5%E5%8F%A3)
+    - [第一步：创建接口](#%E7%AC%AC%E4%B8%80%E6%AD%A5%E5%88%9B%E5%BB%BA%E6%8E%A5%E5%8F%A3)
+    - [赋值（部分1）](#%E8%B5%8B%E5%80%BC%E9%83%A8%E5%88%861)
+    - [赋值（部分2）或者要求垃圾回收帮我们赋值](#%E8%B5%8B%E5%80%BC%E9%83%A8%E5%88%862%E6%88%96%E8%80%85%E8%A6%81%E6%B1%82%E5%9E%83%E5%9C%BE%E5%9B%9E%E6%94%B6%E5%B8%AE%E6%88%91%E4%BB%AC%E8%B5%8B%E5%80%BC)
+    - [结论](#%E7%BB%93%E8%AE%BA-2)
+    - [接口技巧1:字节大小的值](#%E6%8E%A5%E5%8F%A3%E6%8A%80%E5%B7%A71%E5%AD%97%E8%8A%82%E5%A4%A7%E5%B0%8F%E7%9A%84%E5%80%BC)
+    - [接口技巧2:静态推断](#%E6%8E%A5%E5%8F%A3%E6%8A%80%E5%B7%A72%E9%9D%99%E6%80%81%E6%8E%A8%E6%96%AD)
+    - [接口技巧3：零值](#%E6%8E%A5%E5%8F%A3%E6%8A%80%E5%B7%A73%E9%9B%B6%E5%80%BC)
+  - [关于零值变量](#%E5%85%B3%E4%BA%8E%E9%9B%B6%E5%80%BC%E5%8F%98%E9%87%8F)
+  - [关于零大小变量](#%E5%85%B3%E4%BA%8E%E9%9B%B6%E5%A4%A7%E5%B0%8F%E5%8F%98%E9%87%8F)
+- [接口组合](#%E6%8E%A5%E5%8F%A3%E7%BB%84%E5%90%88)
+- [断言](#%E6%96%AD%E8%A8%80)
+  - [类型断言](#%E7%B1%BB%E5%9E%8B%E6%96%AD%E8%A8%80)
+    - [性能如何？](#%E6%80%A7%E8%83%BD%E5%A6%82%E4%BD%95)
+  - [类型switch(Type-switches)](#%E7%B1%BB%E5%9E%8Bswitchtype-switches)
+    - [注1：布局](#%E6%B3%A81%E5%B8%83%E5%B1%80)
+    - [注2：O（n）](#%E6%B3%A82on)
+    - [注3：类型哈希&指针比较](#%E6%B3%A83%E7%B1%BB%E5%9E%8B%E5%93%88%E5%B8%8C%E6%8C%87%E9%92%88%E6%AF%94%E8%BE%83)
+- [结论](#%E7%BB%93%E8%AE%BA-3)
+- [链接](#%E9%93%BE%E6%8E%A5)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
 
@@ -1839,7 +1857,7 @@ $ go tool nm eface_scalar_test.o | grep 'type\.uint32'
 
 说到开销，我们已经提及过在某些特殊情况，编译器实现了各种优化去避免分配一个接口。我们快速看看3个优化，作为本节的结尾吧。
 
-#### 接口优化1:字节大小的值
+#### 接口技巧1:字节大小的值
 
 考虑下面初始化一个`eface<uint8>`（[eface_scalar_test.go](https://github.com/teh-cmc/go-internals/blob/master/chapter2_interfaces/eface_scalar_test.go)）的基准测试:
 ````go
@@ -1872,3 +1890,610 @@ func BenchmarkEfaceScalar(b *testing.B) {
 $ go test -benchmem -bench=BenchmarkEfaceScalar/eface8 ./eface_scalar_test.go
 BenchmarkEfaceScalar/eface8-8         	2000000000	   0.88 ns/op	  0 B/op     0 allocs/op
 ````
+
+我们注意到在这个情况，一个字节大小的值，编译没有为它调用`runtime.convT2E/runtime.convT2I`和在堆中分配内存，而是重用一个全局变量的地址，这个变量在运行时就已经保存了一个字节的值,这个值就是我们要找的了：`LEAQ runtime.staticbytes(SB), R8`。
+
+`runtime.staticbytes`代码在[src/runtime/iface.go](https://github.com/golang/go/blob/bf86aec25972f3a100c3aa58a6abcbcc35bdea49/src/runtime/iface.go#L619-L653),看上去像下面那样:
+
+````go
+// staticbytes is used to avoid convT2E for byte-sized values.
+var staticbytes = [...]byte{
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+    0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
+    0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f,
+    0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f,
+    0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5a, 0x5b, 0x5c, 0x5d, 0x5e, 0x5f,
+    0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x6b, 0x6c, 0x6d, 0x6e, 0x6f,
+    0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7a, 0x7b, 0x7c, 0x7d, 0x7e, 0x7f,
+    0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8a, 0x8b, 0x8c, 0x8d, 0x8e, 0x8f,
+    0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9a, 0x9b, 0x9c, 0x9d, 0x9e, 0x9f,
+    0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf,
+    0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf,
+    0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce, 0xcf,
+    0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xda, 0xdb, 0xdc, 0xdd, 0xde, 0xdf,
+    0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xea, 0xeb, 0xec, 0xed, 0xee, 0xef,
+    0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd, 0xfe, 0xff,
+}
+````
+
+在上面这个数组里面，用对偏移，编译器就能有效的避免分配一个额外的堆，并且仍然引用任何可表示为单个字节的值。
+
+这里有什么感觉不对劲，但是......你能告诉吗？
+
+尽管我们正在操作的指针保存了一个全局变量的地址，但它的生存期与整个程序的相同，所生成的代码仍然嵌入了与写屏障相关的代码。
+也就是说`runtime.staticbytes`，永远不会被垃圾收集，无论内存的哪一部分都引用它，所以在这种情况下，我们不应该为写入障碍的开销付出代价。
+
+#### 接口技巧2:静态推断
+
+考虑这个基准测试，它用一个编译期就能确定的值来实例化一个`eface<uint64>`([eface_scalar_test.go](https://github.com/teh-cmc/go-internals/blob/master/chapter2_interfaces/eface_scalar_test.go)):
+
+````go
+func BenchmarkEfaceScalar(b *testing.B) {
+    b.Run("eface-static", func(b *testing.B) {
+        for i := 0; i < b.N; i++ {
+            // LEAQ  type.uint64(SB), BX
+            // MOVQ  BX, (CX)
+            // MOVL  runtime.writeBarrier(SB), SI
+            // LEAQ  8(CX), DI
+            // TESTL SI, SI
+            // JNE   92
+            // LEAQ  "".statictmp_0(SB), SI
+            // MOVQ  SI, 8(CX)
+            // JMP   40
+            // MOVQ  AX, SI
+            // LEAQ  "".statictmp_0(SB), AX
+            // CALL  runtime.gcWriteBarrier(SB)
+            // MOVQ  SI, AX
+            // LEAQ  "".statictmp_0(SB), SI
+            // JMP   40
+            Eface = uint64(42)
+        }
+    })
+}
+````
+
+````shell
+$ go test -benchmem -bench=BenchmarkEfaceScalar/eface-static ./eface_scalar_test.go
+BenchmarkEfaceScalar/eface-static-8    	2000000000	   0.81 ns/op	  0 B/op     0 allocs/op
+````
+
+从汇编代码可以看到，编译器完全优化掉了`runtime.convT2E64`的调用，而是通过加载自动生成的全局变量的地址来构建一个空接口，而这个全局变量的值就是我们要找的：`LEAQ "".statictmp_0(SB), SI`(注意`SB`，表示一个全局变量)。
+
+我们可以更好地使用我们之前破解的脚本直观地看到发生了什么：`dump_sym.sh`。
+
+````shell
+$ GOOS=linux GOARCH=amd64 go tool compile eface_scalar_test.go
+$ GOOS=linux GOARCH=amd64 go tool link -o eface_scalar_test.bin eface_scalar_test.o
+$ ./dump_sym.sh eface_scalar_test.bin .rodata main.statictmp_0
+.rodata file-offset: 655360
+.rodata VMA: 4849664
+main.statictmp_0 VMA: 5145768
+main.statictmp_0 SIZE: 8
+
+0000000 002a 0000 0000 0000                    
+0000008
+````
+
+正如所料，`main.statictmp_0`是一个八字节变量，它的值是`0x000000000000002a`,即`$42`。
+
+#### 接口技巧3：零值
+
+对于这个最后的技巧,下面的基准测试是用一个零值来初始化`eface<uint32>`[eface_scalar_test.go](https://github.com/teh-cmc/go-internals/blob/master/chapter2_interfaces/eface_scalar_test.go):
+
+````go
+func BenchmarkEfaceScalar(b *testing.B) {
+    b.Run("eface-zeroval", func(b *testing.B) {
+        for i := 0; i < b.N; i++ {
+            // MOVL  $0, ""..autotmp_3+36(SP)
+            // LEAQ  type.uint32(SB), AX
+            // MOVQ  AX, (SP)
+            // LEAQ  ""..autotmp_3+36(SP), CX
+            // MOVQ  CX, 8(SP)
+            // CALL  runtime.convT2E32(SB)
+            // MOVQ  16(SP), AX
+            // MOVQ  24(SP), CX
+            // MOVQ  "".&Eface+48(SP), DX
+            // MOVQ  AX, (DX)
+            // MOVL  runtime.writeBarrier(SB), AX
+            // LEAQ  8(DX), DI
+            // TESTL AX, AX
+            // JNE   152
+            // MOVQ  CX, 8(DX)
+            // JMP   46
+            // MOVQ  CX, AX
+            // CALL  runtime.gcWriteBarrier(SB)
+            // JMP   46
+            Eface = uint32(i - i) // outsmart the compiler (avoid static inference)
+        }
+    })
+}
+````
+
+````shell
+$ go test -benchmem -bench=BenchmarkEfaceScalar/eface-zero ./eface_scalar_test.go
+BenchmarkEfaceScalar/eface-zeroval-8  	 500000000	   3.14 ns/op	  0 B/op     0 allocs/op
+````
+
+首先，注意我们是如何利用`uint32(i - i)`而不是`uint32(0)`阻止编译器回退到优化＃2（静态推断）。
+
+(确实，我们可以定义一个全局的零值变量而编译器就会被迫采取保守的路径，但是我们是有趣的人，不要做无趣的人)。
+
+这个生成的代码现在看上去跟平常没什么两样，但是没有任何内存分配，发生了什么。
+
+我们之前分析`runtime.convT2E32`的时候提过，分配内存可能会被优化掉，而且用的是类似#1 (字节大小的值)的方法：当一些代码需要引用一个变量，而这个变量是个零值，编译器就会返回一个全局变量的地址给它，并且这个全局变量在运行时一直是零的。
+
+类似于`runtime.staticbytes`,我们能在运行时代码找到这个变量([src/runtime/hashmap.go](https://github.com/golang/go/blob/bf86aec25972f3a100c3aa58a6abcbcc35bdea49/src/runtime/hashmap.go#L1248-L1249)):
+
+````go
+const maxZero = 1024 // must match value in ../cmd/compile/internal/gc/walk.go
+var zeroVal [maxZero]byte
+````
+我们的优化之旅就到这里了。
+
+我们汇总了之前看过的测试结果来结束这节。
+
+````shell
+$ go test -benchmem -bench=. ./eface_scalar_test.go
+BenchmarkEfaceScalar/uint32-8         	2000000000	   0.54 ns/op	  0 B/op     0 allocs/op
+BenchmarkEfaceScalar/eface32-8        	 100000000	   12.3 ns/op	  4 B/op     1 allocs/op
+BenchmarkEfaceScalar/eface8-8         	2000000000	   0.88 ns/op	  0 B/op     0 allocs/op
+BenchmarkEfaceScalar/eface-zeroval-8  	 500000000	   3.14 ns/op	  0 B/op     0 allocs/op
+BenchmarkEfaceScalar/eface-static-8    	2000000000	   0.81 ns/op	  0 B/op     0 allocs/op
+````
+
+### 关于零值变量
+
+正如我们刚刚看到的，当由接口生成的数据碰巧引用一个零值时，`runtime.convT2*`函数族避免了堆分配。
+
+这种优化不是特定于接口的，它实际上是Go运行时所做的更广泛工作的一部分，以确保在需要指向零值的指针时，通过采用特殊的，始终不变的运行时零值变量地址来避免不必要的分配。
+
+我们可以用一个简单的程序（[zeroval.go](https://github.com/teh-cmc/go-internals/blob/master/chapter2_interfaces/zeroval.go)）来证实这一点：
+
+````go
+//go:linkname zeroVal runtime.zeroVal
+var zeroVal uintptr
+
+type eface struct{ _type, data unsafe.Pointer }
+
+func main() {
+    x := 42
+    var i interface{} = x - x // outsmart the compiler (avoid static inference)
+
+    fmt.Printf("zeroVal = %p\n", &zeroVal)
+    fmt.Printf("      i = %p\n", ((*eface)(unsafe.Pointer(&i))).data)
+}
+````
+
+````shell
+$ go run zeroval.go
+zeroVal = 0x5458e0
+      i = 0x5458e0
+````
+
+如预期。
+
+请注意`//go:linkname`允许我们引用外部符号的指令：
+
+> // go：linkname指令指示编译器使用“importpath.name”作为源代码中声明为“localname”的变量或函数的目标文件符号名称。由于此指令可以破坏类型系统和程序包模块性，因此只能在导入“不安全(unsafe)”的文件中启用。
+
+### 关于零大小变量
+
+与零值类似，Go程序中的一个非常常见的技巧是依靠实例化大小为0的对象（例如`struct{}{}`）不会导致分配。
+
+正式的Go规格文档（本章结尾部分）以一个注释说明了这一点：
+
+> 如果一个结构或数组类型不包含大小大于零的字段（或元素），则它的大小为零。内存中两个不同的零大小的变量可能具有相同的地址。
+
+“可能”在“可能在内存中具有相同的地址”意味着编译器并不能保证这个事实是真实的，尽管在官方Go编译器（gc）的当前实现中它一直并且仍然是这种情况。
+
+像往常一样，我们可以通过一个简单的程序（[zerobase.go](https://github.com/teh-cmc/go-internals/blob/master/chapter2_interfaces/zerobase.go)）来确认：
+
+````go
+func main() {
+    var s struct{}
+    var a [42]struct{}
+
+    fmt.Printf("s = % p\n", &s)
+    fmt.Printf("a = % p\n", &a)
+}
+````
+
+````shell
+$ go run zerobase.go
+s = 0x546fa8
+a = 0x546fa8
+````
+
+如果我们想知道这个地址背后隐藏着什么，我们可以简单地在这个二进制文件中窥视一下：
+
+````shell
+$ go build -o zerobase.bin zerobase.go && objdump -t zerobase.bin | grep 546fa8 
+0000000000546fa8 g O .noptrbss 0000000000000008 runtime.zerobase
+````
+
+然后在运行时源代码（[src/runtime/malloc.go](https://github.com/golang/go/blob/bf86aec25972f3a100c3aa58a6abcbcc35bdea49/src/runtime/malloc.go#L516-L517)）中找到这个变量`runtime.zerobase`
+
+````go
+// base address for all 0-byte allocations
+var zerobase uintptr
+````
+
+确实如此：
+
+````go
+//go:linkname zerobase runtime.zerobase
+var zerobase uintptr
+
+func main() {
+    var s struct{}
+    var a [42]struct{}
+
+    fmt.Printf("zerobase = %p\n", &zerobase)
+    fmt.Printf("       s = %p\n", &s)
+    fmt.Printf("       a = %p\n", &a)
+}
+````
+
+````shell
+$ go run zerobase.go
+zerobase = 0x546fa8
+       s = 0x546fa8
+       a = 0x546fa8
+````
+
+## 接口组合
+
+接口组合确实没有什么特别之处，它只是编译器暴露的语法糖。
+
+考虑下面的程序（[compound_interface.go](https://github.com/teh-cmc/go-internals/blob/master/chapter2_interfaces/compound_interface.go)）：
+
+````go
+type Adder interface{ Add(a, b int32) int32 }
+type Subber interface{ Sub(a, b int32) int32 }
+type Mather interface {
+    Adder
+    Subber
+}
+
+type Calculator struct{ id int32 }
+func (c *Calculator) Add(a, b int32) int32 { return a + b }
+func (c *Calculator) Sub(a, b int32) int32 { return a - b }
+
+func main() {
+    calc := Calculator{id: 6754}
+    var m Mather = &calc
+    m.Sub(10, 32)
+}
+````
+
+像往常一样，编译器生成相应`itab`的`iface<Mather, *Calculator>`：
+
+````shell
+$ GOOS=linux GOARCH=amd64 go tool compile -S compound_interface.go | \
+  grep -A 7 '^go.itab.\*"".Calculator,"".Mather'
+go.itab.*"".Calculator,"".Mather SRODATA dupok size=40
+    0x0000 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  ................
+    0x0010 5e 33 ca c8 00 00 00 00 00 00 00 00 00 00 00 00  ^3..............
+    0x0020 00 00 00 00 00 00 00 00                          ........
+    rel 0+8 t=1 type."".Mather+0
+    rel 8+8 t=1 type.*"".Calculator+0
+    rel 24+8 t=1 "".(*Calculator).Add+0
+    rel 32+8 t=1 "".(*Calculator).Sub+0
+````
+
+我们可以从重定位指令中看到，编译器生成的虚拟表既包含Adder的方法也包含属于Subber的方法：
+
+````
+rel 24+8 t=1 "".(*Calculator).Add+0
+rel 32+8 t=1 "".(*Calculator).Sub+0
+````
+
+就像我们所说的，接口组合，没有什么秘诀。
+
+一个不相关提示，这个小程序演示了一些直到现在才能看到的东西：生成的`itab`特指一个指针指向一个`构造器`,与之对应的是具体的值，而这两个东西都反映在符号名上(`go.itab.*"".Calculator,"".Mather`)，同时也反映在`_type`,如(`type.*"".Calculator`)。
+
+这与用于命名方法符号的语义是一致的，就像我们在本章开始时看到的那样。
+
+## 断言
+
+从实现和成本的角度来看类型断言，并以此来结束本章。
+
+### 类型断言
+
+考虑这个简短的程序（[eface_to_type.go](https://github.com/teh-cmc/go-internals/blob/master/chapter2_interfaces/eface_to_type.go)）：
+
+````go
+var j uint32
+var Eface interface{} // outsmart compiler (avoid static inference)
+
+func assertion() {
+    i := uint64(42)
+    Eface = i
+    j = Eface.(uint32)
+}
+````
+
+下面是带注解的`j = Eface.(uint32)`的汇编代码：
+
+````assembly
+0x0065 00101 MOVQ	"".Eface(SB), AX		;; AX = Eface._type
+0x006c 00108 MOVQ	"".Eface+8(SB), CX		;; CX = Eface.data
+0x0073 00115 LEAQ	type.uint32(SB), DX		;; DX = type.uint32
+0x007a 00122 CMPQ	AX, DX				;; Eface._type == type.uint32 ?
+0x007d 00125 JNE	162				;; no? panic our way outta here
+0x007f 00127 MOVL	(CX), AX			;; AX = *Eface.data
+0x0081 00129 MOVL	AX, "".j(SB)			;; j = AX = *Eface.data
+;; exit
+0x0087 00135 MOVQ	40(SP), BP
+0x008c 00140 ADDQ	$48, SP
+0x0090 00144 RET
+;; panic: interface conversion: <iface> is <have>, not <want>
+0x00a2 00162 MOVQ	AX, (SP)			;; have: Eface._type
+0x00a6 00166 MOVQ	DX, 8(SP)			;; want: type.uint32
+0x00ab 00171 LEAQ	type.interface {}(SB), AX	;; AX = type.interface{} (eface)
+0x00b2 00178 MOVQ	AX, 16(SP)			;; iface: AX
+0x00b7 00183 CALL	runtime.panicdottypeE(SB)	;; func panicdottypeE(have, want, iface *_type)
+0x00bc 00188 UNDEF
+0x00be 00190 NOP
+````
+
+这里没有什么让人意外的地方：代码将持有`Eface._type`的地址与`type.uint32`地址进行比较，正如我们以前所见，`type.uint32`是由标准库公开的全局符号，持有`_type`结构的内容，是描述`uint32`的结构。
+
+如果`_type`指针匹配，那么一切都很好，我们可以自由地分配`*Eface.data`到`j`; 否则，我们调用`runtime.panicdottypeE`来发出描述这不匹配的异常。
+
+`runtime.panicdottypeE`是一个非常简单的函数，它不会超出你的预期（[src/runtime/iface.go](https://github.com/golang/go/blob/bf86aec25972f3a100c3aa58a6abcbcc35bdea49/src/runtime/iface.go#L235-L245)）：
+
+````go
+// panicdottypeE is called when doing an e.(T) conversion and the conversion fails.
+// have = the dynamic type we have.
+// want = the static type we're trying to convert to.
+// iface = the static type we're converting from.
+func panicdottypeE(have, want, iface *_type) {
+    haveString := ""
+    if have != nil {
+        haveString = have.string()
+    }
+    panic(&TypeAssertionError{iface.string(), haveString, want.string(), ""})
+}
+````
+
+#### 性能如何？
+
+让我们看看在这里得到什么了：一堆`MOV`指令，一条很容易预测的分支，最后但同样重要的一个指针解引用(`j = *Eface.data`)(因为我们之前用具体的值初始化了这个接口，所以它只能在那里，否则我们只能直接拷贝`Eface.data`指针)。
+
+真的，这甚至不值得进行微基准测试。
+
+类似于我们之前测量的动态分配开销，理论上它本身几乎是没有开销的。在实践中，真正的开销是取决于你的代码路径如何设计缓存友好性等问题。
+
+无论如何，一个简单的微基准测试可能会太偏向于告诉我们任何有用的东西。
+
+总而言之，我们最终会得到与往常一样的旧建议：测量您的特定用例，检查处理器的性能计数器，并确定这是否对您的热门路径有明显影响。
+
+它可能。它可能不会。它很可能不会。
+
+### 类型switch(Type-switches)
+
+当然，类型判断有点棘手。考虑下面的代码（[eface_to_type.go](https://github.com/teh-cmc/go-internals/blob/master/chapter2_interfaces/eface_to_type.go)）：
+
+````go
+var j uint32
+var Eface interface{} // outsmart compiler (avoid static inference)
+
+func typeSwitch() {
+    i := uint32(42)
+    Eface = i
+    switch v := Eface.(type) {
+    case uint16:
+        j = uint32(v)
+    case uint32:
+        j = v
+    }
+}
+````
+
+下面是十分简单的类型判断汇编代码(有注解的)：
+
+````assembly
+;; switch v := Eface.(type)
+0x0065 00101 MOVQ	"".Eface(SB), AX	;; AX = Eface._type
+0x006c 00108 MOVQ	"".Eface+8(SB), CX	;; CX = Eface.data
+0x0073 00115 TESTQ	AX, AX			;; Eface._type == nil ?
+0x0076 00118 JEQ	153			;; yes? exit the switch
+0x0078 00120 MOVL	16(AX), DX		;; DX = Eface.type._hash
+;; case uint32
+0x007b 00123 CMPL	DX, $-800397251		;; Eface.type._hash == type.uint32.hash ?
+0x0081 00129 JNE	163			;; no? go to next case (uint16)
+0x0083 00131 LEAQ	type.uint32(SB), BX	;; BX = type.uint32
+0x008a 00138 CMPQ	BX, AX			;; type.uint32 == Eface._type ? (hash collision?)
+0x008d 00141 JNE	206			;; no? clear BX and go to next case (uint16)
+0x008f 00143 MOVL	(CX), BX		;; BX = *Eface.data
+0x0091 00145 JNE	163			;; landsite for indirect jump starting at 0x00d3
+0x0093 00147 MOVL	BX, "".j(SB)		;; j = BX = *Eface.data
+;; exit
+0x0099 00153 MOVQ	40(SP), BP
+0x009e 00158 ADDQ	$48, SP
+0x00a2 00162 RET
+;; case uint16
+0x00a3 00163 CMPL	DX, $-269349216		;; Eface.type._hash == type.uint16.hash ?
+0x00a9 00169 JNE	153			;; no? exit the switch
+0x00ab 00171 LEAQ	type.uint16(SB), DX	;; DX = type.uint16
+0x00b2 00178 CMPQ	DX, AX			;; type.uint16 == Eface._type ? (hash collision?)
+0x00b5 00181 JNE	199			;; no? clear AX and exit the switch
+0x00b7 00183 MOVWLZX	(CX), AX		;; AX = uint16(*Eface.data)
+0x00ba 00186 JNE	153			;; landsite for indirect jump starting at 0x00cc
+0x00bc 00188 MOVWLZX	AX, AX			;; AX = uint16(AX) (redundant)
+0x00bf 00191 MOVL	AX, "".j(SB)		;; j = AX = *Eface.data
+0x00c5 00197 JMP	153			;; we're done, exit the switch
+;; indirect jump table
+0x00c7 00199 MOVL	$0, AX			;; AX = $0
+0x00cc 00204 JMP	186			;; indirect jump to 153 (exit)
+0x00ce 00206 MOVL	$0, BX			;; BX = $0
+0x00d3 00211 JMP	145			;; indirect jump to 163 (case uint16)
+````
+
+再一次，如果你仔细地逐步看生成的代码并仔细阅读相应的注释，你会发现那里没有黑魔法。
+
+控制流程起初可能看起来有点复杂，因为它会跳来跳去，但除了这个之外，就是原始Go代码的忠实再现了。
+
+虽然有不少有趣的事情需要注意。
+
+#### 注1：布局
+
+首先，注意生成的代码的高级布局，它与原始的switch语句非常接近：
+
+1. 我们找到一个初始指令块，它加载我们感兴趣的`_type`变量，并检查nil指针，以防万一。
+2. 然后，我们得到N个逻辑块，每个逻辑块对应于原始switch语句中描述的一种情况。
+3. 最后，最后一个块定义了一种间接跳转表，允许控制流从一种情况跳转到另一种情况，同时确保在路上正确地重置脏寄存器。
+
+虽然事后看来很明显，但第二点非常重要，因为它意味着type-switch语句生成的指令数量纯粹是它所描述的case数量的一个因素。
+
+实际上，这可能会导致令人惊讶的性能问题，例如，如果在错误的路径上使用大量类型切换语句，则会产生大量指令并最终导致L1i缓存抖动。
+
+关于上面简单的switch语句的布局的另一个有趣的事实是在生成的代码中case的顺序。在我们原来的Go代码中，`case uint16`先出现，然后是`case uint32`。然而，在编译器生成的汇编中，它们的顺序已经颠倒过来，`case uint32`现在是第一，`case uint16`是第二个。
+
+在这个特殊情况下，这种重新排序对我们来说是一个净胜，不过是单纯的运气，AFAICT。事实上，如果你花时间用type-switch进行实验，特别是那些有两个以上case的switch，你会发现编译器总是使用某种确定性启发式来改变case顺序。
+
+这些启发式算法是什么，我不知道（但一如既往，如果你愿意，我很乐意）。
+
+#### 注2：O（n）
+
+其次，注意控制流程是如何从一种case向另一种case盲目跳转，直到它落在一个评估为真或最终达到switch语句结尾的状态。
+
+再一次，当一个人真的停下来思考它时（“它还能如何工作？”），当在更高层次推理时，这很容易被忽视。在实践中，这意味着评估类型switch语句的成本，跟case数呈线性增长：它的O(n)。
+
+同样，有效地评估具有N个case的type-switch语句具有与评估N类型断言相同的时间复杂度。正如我们所说，这里没有魔力。
+
+用一堆基准测试（[eface_to_type_test.go](https://github.com/teh-cmc/go-internals/blob/master/chapter2_interfaces/eface_to_type_test.go)）很容易确认：
+
+````go
+var j uint32
+var eface interface{} = uint32(42)
+
+func BenchmarkEfaceToType(b *testing.B) {
+    b.Run("switch-small", func(b *testing.B) {
+        for i := 0; i < b.N; i++ {
+            switch v := eface.(type) {
+            case int8:
+                j = uint32(v)
+            case int16:
+                j = uint32(v)
+            default:
+                j = v.(uint32)
+            }
+        }
+    })
+    b.Run("switch-big", func(b *testing.B) {
+        for i := 0; i < b.N; i++ {
+            switch v := eface.(type) {
+            case int8:
+                j = uint32(v)
+            case int16:
+                j = uint32(v)
+            case int32:
+                j = uint32(v)
+            case int64:
+                j = uint32(v)
+            case uint8:
+                j = uint32(v)
+            case uint16:
+                j = uint32(v)
+            case uint64:
+                j = uint32(v)
+            default:
+                j = v.(uint32)
+            }
+        }
+    })
+}
+````
+
+````shell
+benchstat <(go test -benchtime=1s -bench=. -count=3 ./eface_to_type_test.go)
+name                        time/op
+EfaceToType/switch-small-8  1.91ns ± 2%
+EfaceToType/switch-big-8    3.52ns ± 1%
+````
+
+在所有额外的case下，第二种类型switch的确在每个迭代中需要两倍长的时间。
+
+作为读者的一个有趣的练习，尝试在上面的任何一个基准中（任何地方）添加一个`case uint32`，你会看到他们的性能大幅提升：
+
+````shell
+benchstat <(go test -benchtime=1s -bench=. -count=3 ./eface_to_type_test.go)
+name                        time/op
+EfaceToType/switch-small-8  1.63ns ± 1%
+EfaceToType/switch-big-8    2.17ns ± 1%
+````
+
+使用我们在本章中收集的所有工具和知识，您应该能够解释数字背后的基本原理。祝玩的开心！
+
+#### 注3：类型哈希&指针比较
+
+最后，请注意每种情况下的类型比较总是分两个阶段进行：
+
+1. 比较类型的哈希（`_type.hash`）
+2. 如果它们匹配，则直接比较每个`_type`指针的相应存储器地址。
+
+由于每个`_type`结构都由编译器生成一次，并存储在该`.rodata`节中的全局变量中，因此我们保证每个类型在程序的整个生命周期都被分配一个唯一的地址。
+
+在这种情况下，进行额外的指针比较是有意义的，以确保成功匹配不仅仅是哈希冲突的结果。但是这提出了一个明显的问题：为什么不直接比较指针首先，完全放弃类型哈希的概念？特别是当我们在前面看到简单类型断言时，根本不使用类型散列。
+
+答案是我没有丝毫的线索，并且肯定会对此有所启发。与往常一样，如果您知道更多信息，请随时开issue。
+
+说起类型散列，是什么让我们知道，`$-800397251`对应于`type.uint32.hash`和`$-269349216`于`type.uint16.hash`，你可能想知道？当然，这很难（[eface_type_hash.go](https://github.com/teh-cmc/go-internals/blob/master/chapter2_interfaces/eface_type_hash.go)）：
+
+````go
+// simplified definitions of runtime's eface & _type types
+type eface struct {
+    _type *_type
+    data  unsafe.Pointer
+}
+type _type struct {
+    size    uintptr
+    ptrdata uintptr
+    hash    uint32
+    /* omitted lotta fields */
+}
+
+var Eface interface{}
+func main() {
+    Eface = uint32(42)
+    fmt.Printf("eface<uint32>._type.hash = %d\n",
+        int32((*eface)(unsafe.Pointer(&Eface))._type.hash))
+
+    Eface = uint16(42)
+    fmt.Printf("eface<uint16>._type.hash = %d\n",
+        int32((*eface)(unsafe.Pointer(&Eface))._type.hash))
+}
+````
+
+````shell
+$ go run eface_type_hash.go
+eface<uint32>._type.hash = -800397251
+eface<uint16>._type.hash = -269349216
+````
+
+## 结论
+
+这就是接口。
+
+我希望本章给出了大部分关于接口及其内部的答案。最重要的是，它提供了所有必要工具和技能，方便你需要挖掘更多细节的时候能用到。
+
+如果您有任何问题或建议，请不要犹豫，在`chapter2`开issue吧: prefix!
+
+## 链接
+
+- [[Official] Go 1.1 Function Calls](https://docs.google.com/document/d/1bMwCey-gmqZVTpRax-ESeVuZGmjwbocYs1iHplK-cjo/pub)
+- [[Official] The Go Programming Language Specification](https://golang.org/ref/spec)
+- [The Gold linker by Ian Lance Taylor](https://lwn.net/Articles/276782/)
+- [ELF: a linux executable walkthrough](https://i.imgur.com/EL7lT1i.png)
+- [VMA vs LMA?](https://www.embeddedrelated.com/showthread/comp.arch.embedded/77071-1.php)
+- [In C++ why and how are virtual functions slower?](https://softwareengineering.stackexchange.com/questions/191637/in-c-why-and-how-are-virtual-functions-slower)
+- [The cost of dynamic (virtual calls) vs. static (CRTP) dispatch in C++](https://eli.thegreenplace.net/2013/12/05/the-cost-of-dynamic-virtual-calls-vs-static-crtp-dispatch-in-c)
+- [Why is it faster to process a sorted array than an unsorted array?](https://stackoverflow.com/a/11227902)
+- [Is accessing data in the heap faster than from the stack?](https://stackoverflow.com/a/24057744)
+- [CPU cache](https://en.wikipedia.org/wiki/CPU_cache)
+- [CppCon 2014: Mike Acton "Data-Oriented Design and C++"](https://www.youtube.com/watch?v=rX0ItVEVjHc)
+- [CppCon 2017: Chandler Carruth "Going Nowhere Faster"](https://www.youtube.com/watch?v=2EWejmkKlxs)
+- [What is the difference between MOV and LEA?](https://stackoverflow.com/a/1699778)
